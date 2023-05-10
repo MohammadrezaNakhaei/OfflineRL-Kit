@@ -228,7 +228,9 @@ class COMBOPolicy(CQLPolicy):
         result =  {
             "loss/actor": actor_loss.item(),
             "loss/critic1": critic1_loss.item(),
-            "loss/critic2": critic2_loss.item()
+            "loss/critic2": critic2_loss.item(),
+            "loss/conservative1": conservative_loss1.item(),
+            "loss/conservative2": conservative_loss1.item(),
         }
 
         if self._is_auto_alpha:

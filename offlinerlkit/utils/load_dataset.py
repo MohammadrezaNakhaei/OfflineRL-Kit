@@ -85,14 +85,13 @@ def qlearning_dataset(env, dataset=None, terminate_on_end=False, **kwargs):
 
 
 class SequenceDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, max_len, max_ep_len=1000, device="cpu"):
+    def __init__(self, dataset, max_len, max_ep_len=1000):
         super().__init__()
 
         self.obs_dim = dataset["observations"].shape[-1]
         self.action_dim = dataset["actions"].shape[-1]
         self.max_len = max_len
         self.max_ep_len = max_ep_len
-        self.device = torch.device(device)
         self.input_mean = np.concatenate([dataset["observations"], dataset["actions"]], axis=1).mean(0)
         self.input_std = np.concatenate([dataset["observations"], dataset["actions"]], axis=1).std(0) + 1e-6
 
@@ -162,3 +161,61 @@ class SequenceDataset(torch.utils.data.Dataset):
         masks = torch.from_numpy(masks).to(dtype=torch.float32, device=self.device)
 
         return inputs, targets, masks
+    
+
+def transform_to_episodic(dataset):
+    trajs = []
+    data_ = collections.defaultdict(list)
+    for i in range(dataset["rewards"].shape[0]):
+        done_bool = bool(dataset['terminals'][i])
+        final_timestep = dataset['timeouts'][i] if 'timeouts' in dataset else False
+        for k in ['observations', 'next_observations', 'actions', 'rewards', 'terminals']:
+            data_[k].append(dataset[k][i])
+        if done_bool or final_timestep:
+            episode_data = {}
+            for k in data_:
+                episode_data[k] = np.array(data_[k])
+            trajs.append(episode_data)
+            data_ = collections.defaultdict(list)
+    return trajs
+
+class SequenceDynamicDataset(torch.utils.data.Dataset):
+    def __init__(self, episodes, max_len, device='cpu'):
+        self.trajs = episodes
+        self.max_len = max_len
+        super().__init__()
+        indices = []
+        for traj_ind, traj in enumerate(self.trajs):
+            end = len(traj["rewards"])
+            for i in range(end):
+                indices.append((traj_ind, i, i+self.max_len))
+        self.indices = np.array(indices)
+        self.device = device
+        self.obs_dim = episodes[0]['observations'].shape[-1]
+        self.action_dim = episodes[0]['actions'].shape[-1]
+
+    def __len__(self):
+        return len(self.indices)
+    
+    def __getitem__(self, idx):
+        traj_ind, start_ind, end_ind = self.indices[idx]
+        traj = self.trajs[traj_ind].copy()
+        obss = traj['observations'][start_ind:end_ind]
+        actions = traj['actions'][start_ind:end_ind]
+        next_obss = traj['next_observations'][start_ind:end_ind]
+        rewards = traj['rewards'][start_ind:end_ind].reshape(-1, 1)
+        deltas = next_obss - obss
+        # padding
+        tlen = obss.shape[0]
+        obss = np.concatenate([obss, np.zeros((self.max_len - tlen, self.obs_dim))], axis=0)
+        actions = np.concatenate([actions, np.zeros((self.max_len - tlen, self.action_dim))], axis=0)
+        deltas = np.concatenate([deltas, np.zeros((self.max_len - tlen, self.obs_dim))], axis=0)
+        rewards = np.concatenate([rewards, np.zeros((self.max_len - tlen, 1))], axis=0)
+        masks = np.concatenate([np.ones(tlen), np.zeros(self.max_len - tlen)], axis=0)        
+        obss = torch.as_tensor(obss, dtype=torch.float32)
+        actions = torch.as_tensor(actions, dtype=torch.float32)
+        deltas = torch.as_tensor(deltas, dtype=torch.float32)
+        rewards = torch.as_tensor(rewards, dtype=torch.float32)
+        masks = ~torch.as_tensor(masks, dtype=torch.bool)
+        return obss, actions, deltas, rewards, masks
+    

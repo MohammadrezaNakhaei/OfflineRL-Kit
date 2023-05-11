@@ -3,7 +3,7 @@ from offlinerlkit.modules.critic_module import Critic
 from offlinerlkit.modules.ensemble_critic_module import EnsembleCritic
 from offlinerlkit.modules.dist_module import DiagGaussian, TanhDiagGaussian
 from offlinerlkit.modules.dynamics_module import EnsembleDynamicsModel
-from offlinerlkit.modules.transformer_dynamic_module import GPTDynamicModel
+from offlinerlkit.modules.seq_dynamics_module import GPTDynamicsModel
 
 __all__ = [
     "Actor",
@@ -13,5 +13,5 @@ __all__ = [
     "DiagGaussian",
     "TanhDiagGaussian",
     "EnsembleDynamicsModel",
-    "GPTDynamicModel",
+    "GPTDynamicsModel",
 ]

@@ -116,3 +116,70 @@ class EnsembleDynamicsModel(nn.Module):
     def random_elite_idxs(self, batch_size: int) -> np.ndarray:
         idxs = np.random.choice(self.elites.data.cpu().numpy(), size=batch_size)
         return idxs
+    
+
+class DecoupledDynamicsModel(nn.Module):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dims: Union[List[int], Tuple[int]],
+        activation: nn.Module = Swish,
+        device: str = "cpu"
+    ) -> None:
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.device = torch.device(device)
+        self.activation = activation()     
+
+        module_list = []
+        hidden_dims = [obs_dim] + list(hidden_dims)
+        for in_dim, out_dim in zip(hidden_dims[:-1], hidden_dims[1:]):
+            module_list.append(nn.Linear(in_dim, out_dim))
+            module_list.append(self.activation)
+        self.backbones = nn.Sequential(*module_list)
+
+        self.output_layer = nn.Linear(
+            hidden_dims[-1],
+            obs_dim*obs_dim+obs_dim*action_dim+obs_dim, # A: n*n, B: n*m, n for std
+        )
+
+        self.reward_model = nn.Sequential(
+            nn.Linear(obs_dim+action_dim, 64),
+            self.activation,
+            nn.Linear(64,64),
+            self.activation,
+            nn.Linear(64,1)
+        )
+
+        self.register_parameter(
+            "max_logvar",
+            nn.Parameter(torch.ones(obs_dim) * 0.5, requires_grad=True)
+        )
+        self.register_parameter(
+            "min_logvar",
+            nn.Parameter(torch.ones(obs_dim) * -10, requires_grad=True)
+        )
+        self.to(self.device)
+
+    def forward(self, obs: torch.Tensor, action: torch.Tensor)-> Tuple[torch.Tensor, torch.Tensor]:
+        output = self.output_layer(self.backbones(obs))
+        n = self.obs_dim
+        m = self.action_dim
+        A = output[:, :n*n]
+        B = output[:, n*n:n*n+n*m]
+        logvar = output[:, -n:]
+        logvar = soft_clamp(logvar, self.min_logvar, self.max_logvar)
+        A = A.reshape(-1, n, n)
+        B = B.reshape(-1, n, m)        
+        return A, B, logvar
+    
+    def predict(self, obs: torch.Tensor, action: torch.Tensor)-> Tuple[torch.Tensor, torch.Tensor]:
+        A, B, logvar = self.forward(obs, action)
+        n = self.obs_dim
+        m = self.action_dim        
+        delta = A@obs.reshape(-1,n,1) + B@action.reshape(-1,m, 1)
+        delta = delta.squeeze(-1)
+        reward = self.reward_model(torch.cat([obs, action], dim=-1))
+        return delta, logvar, reward

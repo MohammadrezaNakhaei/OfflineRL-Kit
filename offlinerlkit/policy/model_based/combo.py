@@ -229,8 +229,8 @@ class COMBOPolicy(CQLPolicy):
             "loss/actor": actor_loss.item(),
             "loss/critic1": critic1_loss.item(),
             "loss/critic2": critic2_loss.item(),
-            "loss/conservative1": conservative_loss1.item(),
-            "loss/conservative2": conservative_loss1.item(),
+            "loss/conservative1": conservative_loss1.item()/self._cql_weight,
+            "loss/conservative2": conservative_loss1.item()/self._cql_weight,
         }
 
         if self._is_auto_alpha:

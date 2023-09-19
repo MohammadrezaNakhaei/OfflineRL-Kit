@@ -258,10 +258,10 @@ class Logger(object):
         self._checkpoint_dir = os.path.join(self._dir, "checkpoint")
         self._model_dir = os.path.join(self._dir, "model")
         self._result_dir = os.path.join(self._dir, "result")
-        os.mkdir(self._record_dir)
-        os.mkdir(self._checkpoint_dir)
-        os.mkdir(self._model_dir)
-        os.mkdir(self._result_dir)
+        os.makedirs(self._record_dir, exist_ok=True)
+        os.makedirs(self._checkpoint_dir, exist_ok=True)
+        os.makedirs(self._model_dir, exist_ok=True)
+        os.makedirs(self._result_dir, exist_ok=True)
     
     def _init_ouput_handlers(self, output_config: Dict) -> None:
         self._output_handlers = []
@@ -354,9 +354,9 @@ def make_log_dirs(
         for param_name in record_params:
             algo_name += f"&{param_name}={args[param_name]}"
     timestamp = datetime.datetime.now().strftime("%y-%m%d-%H%M%S")
-    exp_name = f"seed_{seed}&timestamp_{timestamp}"
+    exp_name = f"seed_{seed}"
     log_dirs = os.path.join(ROOT_DIR, task_name, algo_name, exp_name)
-    os.makedirs(log_dirs)
+    os.makedirs(log_dirs, exist_ok=True)
     return log_dirs
 
 

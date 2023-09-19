@@ -7,17 +7,18 @@ from torch.nn import functional as F
 from typing import Dict, Union, Tuple
 from collections import defaultdict
 from offlinerlkit.policy import COMBOPolicy
-from offlinerlkit.dynamics import BaseDynamics
+from offlinerlkit.dynamics import SequenceDynamics
 
 
 class SECOMBOPolicy(COMBOPolicy):
     """
     Conservative Offline Model-Based Policy Optimization <Ref: https://arxiv.org/abs/2102.08363>
+    Sequential (GPT style) dynamic model is used
     """
 
     def __init__(
         self,
-        dynamics: BaseDynamics,
+        dynamics: SequenceDynamics,
         actor: nn.Module,
         critic1: nn.Module,
         critic2: nn.Module,

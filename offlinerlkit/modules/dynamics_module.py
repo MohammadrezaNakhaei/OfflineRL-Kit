@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 from typing import Dict, List, Union, Tuple, Optional
 from offlinerlkit.nets import EnsembleLinear
+from offlinerlkit.nets import MLP
 
 
 class Swish(nn.Module):
@@ -183,3 +184,55 @@ class DecoupledDynamicsModel(nn.Module):
         delta = delta.squeeze(-1)
         reward = self.reward_model(torch.cat([obs, action], dim=-1))
         return delta, logvar, reward
+    
+
+class KoopmanDynamicModel(nn.Module):
+    def __init__(
+            self,
+            obs_dim: int,
+            action_dim: int,
+            latent_dim: int,
+            hidden_dims: Union[List[int], Tuple[int]],
+            activation: nn.Module = nn.ReLU,
+            device: str = "cpu",
+            ) -> None:
+        super().__init__()
+        n_koopman = obs_dim + latent_dim
+        self.encoder = MLP(obs_dim, hidden_dims, latent_dim, activation)
+        self.lA = nn.Linear(n_koopman, n_koopman, bias=False)
+        nn.init.normal_(self.lA.weight.data, 0, 1/latent_dim)
+        U, _, V = torch.svd(self.lA.weight.data)
+        self.lA.weight.data = torch.mm(U, V.t()) * 0.9
+        self.lB = nn.Linear(action_dim, n_koopman, bias=False)  
+        self.reward_model = MLP(obs_dim+action_dim, [64,64], 1)
+        self.to(device)
+        self.device = device     
+
+    def reward(self, state:torch.Tensor, u:torch.Tensor,):
+        return self.reward_model(torch.cat([state, u], dim=-1))
+
+    def encode_only(self, state:torch.Tensor):
+        return self.encoder(state)
+
+    # encoded: [state, latent]
+    def encode(self, state:torch.Tensor):
+        return torch.cat([state, self.encoder(state)],axis=-1)
+    
+    # take latent state as input!
+    def forward(self, x:torch.Tensor, u:torch.Tensor):
+        return self.lA(x)+self.lB(u) 
+    
+    def predict(self, state:torch.Tensor, u:torch.Tensor):
+        x = self.encode(state)
+        reward = self.reward(state, u)
+        next_x= self.forward(x, u)
+        return next_x[:, :state.shape[1]], reward
+        
+    @torch.no_grad()
+    def A(self,):
+        return self.lA.weight.data
+    
+    @torch.no_grad()
+    def B(self,):
+        return self.lB.weight.data
+    

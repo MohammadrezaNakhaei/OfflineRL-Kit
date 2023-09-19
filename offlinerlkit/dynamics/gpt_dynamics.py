@@ -37,7 +37,9 @@ class SequenceDynamics(BaseDynamics):
         num_workers: int = 4,
 
     ) -> None:
-        self.scaler.fit(data['observations'])
+        #self.scaler.fit(data['observations'])
+        #self.scaler.transform(data['observations'])
+        #self.scaler.transform(data['next_observations'])
         episodes = transform_to_episodic(data)
         data_size = len(episodes)
         random.shuffle(episodes)

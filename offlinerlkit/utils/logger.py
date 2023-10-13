@@ -118,7 +118,7 @@ class JSONOutputHandler(KVWriter):
         """
         log to a file in the JSON format
         """
-        self.file = open(filename+".json", 'at')
+        self.file = open(filename+".json", 'wt')
         self.handler_name = os.path.basename(filename)
         super().__init__()
 

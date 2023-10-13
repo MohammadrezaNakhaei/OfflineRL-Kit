@@ -207,7 +207,7 @@ class KoopmanDynamicsOneStep(BaseDynamics):
             loss_pred = F.mse_loss(next_encoded[:, :obs_dim], tmp['next_observations'])
             x_hat = self.model.encode(next_encoded[:, :obs_dim])
             aug_loss = F.mse_loss(x_hat, next_encoded)
-            loss = loss_pred
+            loss = loss_pred + aug_loss
             self.optim.zero_grad()
             loss.backward()
             self.optim.step()
@@ -229,4 +229,48 @@ class KoopmanDynamicsOneStep(BaseDynamics):
     
     def load(self, load_path: str) -> None:
         self.model.load_state_dict(torch.load(os.path.join(load_path, "dynamics.pth"), map_location=self.model.device))
-        self.scaler.load_scaler(load_path)
+        #self.scaler.load_scaler(load_path)
+
+
+
+class KoopmanDynamicsCosine(KoopmanDynamicsOneStep):
+    def __init__(
+        self,
+        model: KoopmanDynamicModel,
+        optim: torch.optim.Optimizer,
+        scaler: StandardScaler,
+        terminal_fn: Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray],
+    ) -> None:
+        super().__init__(model, optim, scaler, terminal_fn)
+
+    def learn(
+        self,
+        train_data: dict,
+        batch_size: int = 256,
+        logvar_loss_coef: float = 0.01
+    ) -> float:
+        self.model.train()
+        train_size = train_data['observations'].shape[0]
+        total_loss = 0
+        for batch_num in range(int(np.ceil(train_size / batch_size))):
+            tmp = {}
+            for k, v in train_data.items():
+                item = v[batch_num * batch_size:(batch_num + 1) * batch_size]
+                tmp[k] = torch.as_tensor(item).to(self.model.device)
+            
+            encoded = self.model.encode(tmp['observations'])
+            next_encoded = self.model(encoded, tmp['actions'])
+            obs_dim = tmp['next_observations'].shape[1]
+            x = F.normalize(next_encoded[:, :obs_dim], dim=-1, p=2)
+            y = F.normalize(tmp['next_observations'], dim=-1, p=2)
+            loss_pred = 2 - 2 * (x * y).sum(dim=-1,).mean()
+            x_hat = self.model.encode(next_encoded[:, :obs_dim])
+            aug_loss = F.mse_loss(x_hat, next_encoded)
+            loss = loss_pred 
+            self.optim.zero_grad()
+            loss.backward()
+            self.optim.step()
+            total_loss+=loss.item()
+        return total_loss/batch_num
+    
+        

@@ -206,7 +206,10 @@ class KoopmanDynamicModel(nn.Module):
         self.lB = nn.Linear(action_dim, n_koopman, bias=False)  
         self.reward_model = MLP(obs_dim+action_dim, [64,64], 1)
         self.to(device)
-        self.device = device     
+        self.device = device
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim  
+        self.n_koopman = n_koopman   
 
     def reward(self, state:torch.Tensor, u:torch.Tensor,):
         return self.reward_model(torch.cat([state, u], dim=-1))

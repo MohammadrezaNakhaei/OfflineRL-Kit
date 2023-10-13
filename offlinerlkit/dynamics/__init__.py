@@ -4,7 +4,7 @@ from offlinerlkit.dynamics.rnn_dynamics import RNNDynamics
 from offlinerlkit.dynamics.mujoco_oracle_dynamics import MujocoOracleDynamics
 from offlinerlkit.dynamics.gpt_dynamics import SequenceDynamics
 from offlinerlkit.dynamics.decoupled_dynamics import DecoupledDynamics
-from offlinerlkit.dynamics.koopman_dynamics import KoopmanDynamics, KoopmanDynamicsOneStep
+from offlinerlkit.dynamics.koopman_dynamics import KoopmanDynamics, KoopmanDynamicsOneStep, KoopmanDynamicsCosine
 __all__ = [
     "BaseDynamics",
     "EnsembleDynamics",
@@ -13,5 +13,6 @@ __all__ = [
     "SequenceDynamics",
     "DecoupledDynamics",
     "KoopmanDynamics",
-    "KoopmanDynamicsOneStep"
+    "KoopmanDynamicsOneStep",
+    "KoopmanDynamicsCosine",
 ]

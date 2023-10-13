@@ -5,24 +5,20 @@ import random
 
 import gym
 import d4rl
-
 import numpy as np
 import torch
 
-
 from offlinerlkit.modules import KoopmanDynamicModel
-from offlinerlkit.dynamics import KoopmanDynamics, KoopmanDynamicsOneStep
+from offlinerlkit.dynamics import KoopmanDynamics, KoopmanDynamicsOneStep, KoopmanDynamicsCosine
 from offlinerlkit.utils.scaler import StandardScaler
 from offlinerlkit.utils.termination_fns import get_termination_fn
 from offlinerlkit.utils.load_dataset import qlearning_dataset
-from offlinerlkit.buffer import ReplayBuffer
 from offlinerlkit.utils.logger import Logger, make_log_dirs
-from offlinerlkit.policy_trainer import MBPolicyTrainer
-from offlinerlkit.policy import COMBOPolicy
+
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--algo-name", type=str, default="koopman-onestep")
+    parser.add_argument("--algo-name", type=str, default="koopman-onestep-cosine")
     parser.add_argument("--task", type=str, default="hopper-medium-v2")
     parser.add_argument("--seed", type=int, default=1)
 
@@ -31,13 +27,13 @@ def get_args():
 
     parser.add_argument("--embedding-dim", type=int, default=7)
     parser.add_argument("--dynamics-hidden-dims", type=int, nargs='*', default=[256, 256])
-    parser.add_argument("--seq-len", type=int, default=10)
     parser.add_argument("--dynamic-epoch", type=int, default=None)
     parser.add_argument("--step-per-epoch", type=int, default=1000)
     parser.add_argument("--eval_episodes", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
+
 
 def train(args=get_args()):
     # create env and dataset
@@ -68,7 +64,7 @@ def train(args=get_args()):
     )
     scaler = StandardScaler()
     termination_fn = get_termination_fn(task=args.task)
-    dynamics = KoopmanDynamicsOneStep(
+    dynamics = KoopmanDynamicsCosine(
         dynamics_model,
         dynamics_optim,
         scaler,

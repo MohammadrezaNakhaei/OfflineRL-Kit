@@ -1,32 +1,26 @@
 import argparse
 import os
-import sys
 import random
-
 import gym
-import d4rl
-
+import pickle
 import numpy as np
 import torch
-
-
+import pandas as pd
+import d4rl 
 from offlinerlkit.nets import MLP
 from offlinerlkit.modules import ActorProb, Critic, TanhDiagGaussian, KoopmanDynamicModel
-from offlinerlkit.dynamics import KoopmanDynamics, KoopmanDynamicsOneStep
+from offlinerlkit.dynamics import KoopmanDynamics, KoopmanDynamicsOneStep, KoopmanDynamicsCosine
 from offlinerlkit.utils.scaler import StandardScaler
 from offlinerlkit.utils.termination_fns import get_termination_fn
-from offlinerlkit.utils.load_dataset import qlearning_dataset
-from offlinerlkit.buffer import ReplayBuffer
-from offlinerlkit.utils.logger import Logger, make_log_dirs
-from offlinerlkit.policy_trainer import MBPolicyTrainer
+from offlinerlkit.utils.logger import make_log_dirs
 from offlinerlkit.policy import COMBOPolicy
 
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--algo-name", type=str, default="koopman-combo-onestep")
+    parser.add_argument("--algo-name", type=str, default="combo")
     parser.add_argument("--task", type=str, default="hopper-medium-v2")
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--actor-lr", type=float, default=1e-4)
     parser.add_argument("--critic-lr", type=float, default=3e-4)
     parser.add_argument("--hidden-dims", type=int, nargs='*', default=[256, 256, 256])
@@ -67,14 +61,16 @@ def get_args():
     parser.add_argument("--eval_episodes", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-
+    parser.add_argument("--adaptive_gain", type=float, default=-100)
+    parser.add_argument("--k", type=float, default=0.01,) 
     return parser.parse_args()
 
 
-def train(args=get_args()):
+def train(args=get_args(), delta_m=1):
     # create env and dataset
     env = gym.make(args.task)
-    dataset = qlearning_dataset(env)
+    model = env.env.wrapped_env.model
+    model.body_mass[1] *= delta_m    
     args.obs_shape = env.observation_space.shape
     args.action_dim = np.prod(env.action_space.shape)
     args.max_action = env.action_space.high[0]
@@ -117,7 +113,6 @@ def train(args=get_args()):
         alpha = args.alpha
 
     # create dynamics
-    load_dynamics_model = True if args.load_dynamics_path else False
     dynamics_model = KoopmanDynamicModel(
         obs_dim=np.prod(args.obs_shape),
         action_dim=args.action_dim,
@@ -131,15 +126,12 @@ def train(args=get_args()):
     )
     scaler = StandardScaler()
     termination_fn = get_termination_fn(task=args.task)
-    dynamics = KoopmanDynamicsOneStep(
+    dynamics = KoopmanDynamicsCosine(
         dynamics_model,
         dynamics_optim,
         scaler,
         termination_fn
     )
-
-    if args.load_dynamics_path:
-        dynamics.load(args.load_dynamics_path)
 
     # create policy
     policy = COMBOPolicy(
@@ -166,64 +158,124 @@ def train(args=get_args()):
         rho_s=args.rho_s
     )
 
-    # create buffer
-    real_buffer = ReplayBuffer(
-        buffer_size=len(dataset["observations"]),
-        obs_shape=args.obs_shape,
-        obs_dtype=np.float32,
-        action_dim=args.action_dim,
-        action_dtype=np.float32,
-        device=args.device
-    )
-    real_buffer.load_dataset(dataset)
-    fake_buffer = ReplayBuffer(
-        buffer_size=args.rollout_batch_size*args.rollout_length*args.model_retain_epochs,
-        obs_shape=args.obs_shape,
-        obs_dtype=np.float32,
-        action_dim=args.action_dim,
-        action_dtype=np.float32,
-        device=args.device
-    )
-
-    # log
     log_dirs = make_log_dirs(args.task, args.algo_name, args.seed, vars(args))
+    dynamic_base_dirs = make_log_dirs(args.task, 'koopman-onestep-cosine', args.seed, vars(args))
     # key: output file name, value: output handler type
-    output_config = {
-        "consoleout_backup": "stdout",
-        "policy_training_progress": "csv",
-        "dynamics_training_progress": "csv",
-        "tb": "tensorboard"
-    }
-    logger = Logger(log_dirs, output_config)
-    logger.log_hyperparameters(vars(args))
+    load_policy_path = os.path.join(log_dirs, 'checkpoint/policy.pth')
+    load_dynamic_path = os.path.join(dynamic_base_dirs, 'model')
+    dynamics.load(load_dynamic_path)
+    policy.load_state_dict(torch.load(load_policy_path))
+    l1controller = L1Controller(dynamics_model, args.adaptive_gain, args.k, 0.002)
+    print(f'Evaluation: Delta: {delta_m}, adaptive gain:{args.adaptive_gain}, k:{args.k}')
+    results = evaluate(env, policy, n_eval=10, L1=l1controller)
+    os.makedirs(f'result/{args.task}_seed{args.seed}_cos2', exist_ok=True)
+    with open(f'result/{args.task}_seed{args.seed}_cos2/adaptive-gain_{abs(args.adaptive_gain)}_k_{args.k}_delta_{delta_m}.pkl', 'wb') as f:
+        pickle.dump(results, f)
 
-    # create policy trainer
-    policy_trainer = MBPolicyTrainer(
-        policy=policy,
-        eval_env=env,
-        real_buffer=real_buffer,
-        fake_buffer=fake_buffer,
-        logger=logger,
-        rollout_setting=(args.rollout_freq, args.rollout_batch_size, args.rollout_length),
-        epoch=args.epoch,
-        step_per_epoch=args.step_per_epoch,
-        batch_size=args.batch_size,
-        real_ratio=args.real_ratio,
-        eval_episodes=args.eval_episodes,
-        lr_scheduler=lr_scheduler
-    )
 
-    # train
-    if not load_dynamics_model:
-        dynamics.train(
-            dataset, logger, 
-            max_epochs_since_update=5, 
-            # max_len=args.seq_len, 
-            # num_workers=args.num_workers,
-            max_epochs=args.dynamic_epoch)
-    
-    policy_trainer.train()
+class L1Controller():
+    """
+    L1 addaptive controller based on nearal network approximator for dynamic equation 
+    Arguements:
+        addaptive_gain: control gain used to estimate uncertainties
+        k: control gain used in determining adaptive action
+        ts: time sampling rate (could be different from the real time sampling, better to be the same)        
+    """
+    def __init__(self, dynamic_model, adaptive_gain, k, ts=0.02):
+        # system nominal parameter
+        self.ts = ts
+        self.net = dynamic_model.to('cpu')
+        self.f = dynamic_model.A().cpu().numpy()
+        self.g = dynamic_model.B().cpu().numpy()
+        self.n = dynamic_model.n_koopman # state size
+        self.m = dynamic_model.action_dim # action size
+        self.adaptive_gain = adaptive_gain*np.diag([1.0]*self.n)
+        self.k = k
+        self.x_hat = np.zeros(self.n) # state estimation
+        self.u_adaptive = np.zeros(self.m)
 
+    def reset(self, x_hat = None):
+        if x_hat is None:
+            self.x_hat = np.zeros(self.n)
+        else:
+            self.x_hat = np.array(x_hat)
+        self.u_adaptive = np.zeros(self.m)
+
+    # estimate uncertainties
+    def adaptive_law(self, x,):
+        x_tilda = self.x_hat-x
+        b_sigma = np.matmul(self.adaptive_gain, x_tilda.reshape(self.n,1))
+        sigma_m = np.linalg.pinv(self.g)@b_sigma
+        return b_sigma.reshape(self.n), sigma_m.reshape(self.m)
+
+    def state_predictor(self, u, b_sigma, x):
+        x_hat_dot = self.f@x.reshape(self.n,1) + self.g@u.reshape(self.m,1)
+        x_hat_dot = x_hat_dot.reshape(self.n)+b_sigma
+        return x_hat_dot
+ 
+    # correct the action
+    def u_next(self, u_policy, sigma_m):
+        u = -self.u_adaptive + u_policy
+        eta_hat = self.u_adaptive + sigma_m
+        u_dot = -self.k*eta_hat
+        next_u = u + u_dot*self.ts
+        self.u_adaptive = next_u-u_policy
+        return next_u
+
+    # main function for each timestep
+    def step(self, x, u_policy):
+        # approximate f and b vector (dynamic equation) from learned NN
+        with torch.no_grad():
+            x = self.net.encode(torch.as_tensor(x, dtype=torch.float32))
+        x = x.cpu().numpy()
+        b_sigma, sigma_m = self.adaptive_law(x)
+        x_hat_dot = self.state_predictor(u_policy+self.u_adaptive, b_sigma, x)
+        u_next = self.u_next(u_policy, sigma_m)
+        self.x_hat = self.x_hat + x_hat_dot*self.ts
+        return u_next, sigma_m, x
+
+def evaluate(env, policy, L1=None, n_eval=10,):
+    results = {}
+    rewards = np.zeros(n_eval)
+    for i in range(n_eval):
+        obs = env.reset()
+        if L1:
+            L1.reset()
+        ep_reward = 0
+        states, x_hats, sigma_hats, adaptive_actions, policy_actions = [],[],[],[],[]
+        while True:
+            action = policy.select_action(obs)
+            if L1:
+
+                action, sigma_hat, x = L1.step(obs, action)
+                states.append(x)
+                x_hats.append(L1.x_hat)
+                sigma_hats.append(sigma_hat)
+                adaptive_actions.append(L1.u_adaptive)
+                policy_actions.append(action-L1.u_adaptive)
+            obs, reward, done, _ = env.step(action)
+            ep_reward+=reward
+            if done:
+                rewards[i] = ep_reward
+                ep_result = {
+                    'states': states,
+                    'x_hats': x_hats,
+                    'sigma_hats': sigma_hats,
+                    'adaptive_actions': adaptive_actions,
+                    'policy_actions': policy_actions,
+                    'total_reward': ep_reward
+                }
+                results[i] = ep_result
+                break
+    rewards = env.get_normalized_score(rewards)
+    print(f'Mean reward {100*np.mean(rewards):.2f}, std reward {100*np.std(rewards):.2f}')
+    return results
 
 if __name__ == "__main__":
-    train()
+    for delta_m in (1, 1.2, 1.5, 2, 0.8, 0.6, 0.5):
+        for k in (0, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5):
+            for adaptive_gain in (0, -1, -10, -50, -75, -100, -200, -500):
+                args = get_args()
+                args.k = k
+                args.adaptive_gain = adaptive_gain
+                train(args=args, delta_m=delta_m)

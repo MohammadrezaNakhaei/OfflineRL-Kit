@@ -9,4 +9,4 @@
 **/.vscode
 **/_log
 **/result
-**/test.ipynb
+run_example/test.ipynb

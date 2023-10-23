@@ -192,7 +192,7 @@ def train(mainargs=get_args(), delta_m=1):
     logger.log_hyperparameters(vars(args))
 
     res_agent = ResidualAgentTrainer(
-        env, policy, dynamics, res_policy, 
+        env, eval_env, policy, dynamics, res_policy, 
         real_buffer, aug_buffer, logger, 
         res_action_coef=mainargs.coeff_residual,
         )    

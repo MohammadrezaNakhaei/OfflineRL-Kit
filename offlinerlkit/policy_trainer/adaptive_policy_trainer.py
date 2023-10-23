@@ -10,9 +10,12 @@ from offlinerlkit.buffer import ReplayBuffer
 
 
 class ResidualAgentTrainer:
+    EVAL_EVERY = 5000
+    SAVE_EVERY = 50000
     def __init__(
             self, 
             env: gym.Env,
+            eval_env: gym.Env,
             policy: BasePolicy, 
             dynamics: BaseDynamics, 
             residual_agent: (SACPolicy, TD3Policy), 
@@ -22,6 +25,7 @@ class ResidualAgentTrainer:
             res_action_coef:float = 1,
     ):
         self.env = env
+        self.eval_env = eval_env
         self.policy = policy
         self.dynamics = dynamics
         self.agent = residual_agent
@@ -69,38 +73,13 @@ class ResidualAgentTrainer:
         else:
             return policy_action
                 
-    @torch.no_grad()
-    def collect_one_episode(self, k, deterministic=False, ts=0.05, residual_agent=True):
-        device = self.real_buffer.device
-        obs, done = self.env.reset(), False
-        x_hat = obs # estimated state
-        ep_reward = 0
-        while not done:
-            policy_act = self.policy.select_action(torch.as_tensor(obs).to(device), True) # policy action
-            state = self._prepare_state(obs, x_hat, policy_act, k)
-            res_action = self.agent.select_action(torch.as_tensor(state).to(device), deterministic) 
-            action = self._prepare_action(policy_act, res_action, residual_agent)            
-            next_obs, reward, done, info = self.env.step(action)
-            pred_next_obs, *_ = self.dynamics.step(obs.reshape(1,-1), action.reshape(1,-1))
-            pred_next_obs = pred_next_obs.reshape(-1,)
-            x_hat_dot = pred_next_obs+k*(obs-x_hat)
-            next_x_hat = x_hat + x_hat_dot*ts
-            next_policy_action = self.policy.select_action(torch.as_tensor(next_obs).to(device), True)
-            next_state = self._prepare_state(next_obs, next_x_hat, next_policy_action, k)
-            self.buffer.add(state, next_state, res_action, reward, done)
-            ep_reward+=reward
-            obs = next_obs
-            x_hat = next_x_hat
-        ep_reward = self.env.get_normalized_score(ep_reward)*100
-        self.logger.logkv('reward', ep_reward)
-        return ep_reward
     
     @torch.no_grad()
-    def evaluate(self, k, res_agent=True, deterministic=True, ts=0.05, num_eval=10):
+    def evaluate(self, k, res_agent=True, deterministic=True, ts=0.05, num_eval=20):
         device = self.real_buffer.device
         rewards = np.zeros(num_eval)
         for n in range(num_eval):
-            obs, done = self.env.reset(), False
+            obs, done = self.eval_env.reset(), False
             x_hat = obs # estimated state
             ep_reward = 0
             while not done:
@@ -108,7 +87,7 @@ class ResidualAgentTrainer:
                 state = self._prepare_state(obs, x_hat, policy_act, k)
                 res_action = self.agent.select_action(torch.as_tensor(state).to(device), deterministic)
                 action = self._prepare_action(policy_act, res_action, res_agent) 
-                next_obs, reward, done, info = self.env.step(action)
+                next_obs, reward, done, info = self.eval_env.step(action)
                 pred_next_obs, *_ = self.dynamics.step(obs.reshape(1,-1), action.reshape(1,-1))
                 pred_next_obs = pred_next_obs.reshape(-1,)
                 x_hat_dot = pred_next_obs+k*(obs-x_hat)
@@ -117,9 +96,17 @@ class ResidualAgentTrainer:
                 obs = next_obs
                 x_hat = next_x_hat
             rewards[n] = ep_reward
-        ep_reward = self.env.get_normalized_score(np.mean(rewards))*100
+        ep_reward = self.eval_env.get_normalized_score(np.mean(rewards))*100
+        std = self.eval_env.get_normalized_score(np.std(rewards))*100
         self.logger.logkv('eval_reward', ep_reward)
+        self.logger.logkv('eval_reward_std', std)
+        self.logger.dumpkvs()
         return ep_reward         
+    
+    def save(self, tag:str='best'):
+        path = f'{self.logger.model_dir}/residual_agent_{tag}.pth'
+        torch.save(self.agent.state_dict(), path)
+
     
     def train_epoch(self, num_step:int, batch_size:int=256):
         self.agent.train()
@@ -139,15 +126,53 @@ class ResidualAgentTrainer:
         return loss
         
 
-    def train(self, num_epoch:int, num_train:int, batch_size:int=256):
-        policy_reward= self.evaluate(20, res_agent=False)
+    def train_episodic(self, max_steps:int, update_ratio: int=2, batch_size:int=256, k:float=20, ts:float=0.05):
+        device = self.real_buffer.device
+        policy_reward= self.evaluate(k, res_agent=False)
         self.logger.log('Training the agent')
         self.logger.log(f'Initial policy reward: {policy_reward:.2f}')
-        for e in range(1,num_epoch+1):
-            self.logger.set_timestep(e)
-            reward = self.collect_one_episode(k=20, deterministic=False)
-            self.train_epoch(num_train, batch_size)
-            self.evaluate(k=20)
+        total_t = 0
+        t = 0
+        best_reward = 0
+        while True:
+            obs, done = self.env.reset(), False
+            x_hat = obs # estimated state
+            ep_reward = 0
+            while not done and total_t<=max_steps:
+                total_t+=1
+                policy_act = self.policy.select_action(torch.as_tensor(obs).to(device), True) # policy action
+                state = self._prepare_state(obs, x_hat, policy_act, k)
+                res_action = self.agent.select_action(torch.as_tensor(state).to(device), False)
+                action = self._prepare_action(policy_act, res_action, True) 
+                next_obs, reward, done, info = self.env.step(action)
+                pred_next_obs, *_ = self.dynamics.step(obs.reshape(1,-1), action.reshape(1,-1))
+                pred_next_obs = pred_next_obs.reshape(-1,)
+                x_hat_dot = pred_next_obs+k*(obs-x_hat)
+                next_x_hat = x_hat + x_hat_dot*ts
+                next_policy_action = self.policy.select_action(torch.as_tensor(next_obs).to(device), True)
+                next_state = self._prepare_state(next_obs, next_x_hat, next_policy_action, k)
+                self.buffer.add(state, next_state, res_action, reward, done)
+                ep_reward+=reward
+                obs = next_obs
+                x_hat = next_x_hat 
+                # update the policy
+                n_trainint_step = update_ratio*(total_t-t)
+                self.train_epoch(n_trainint_step, batch_size)
+                if total_t%self.EVAL_EVERY==0:
+                    self.logger.set_timestep(total_t)
+                    eval_reward = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
+                    if eval_reward>best_reward:
+                        self.save()
+                        best_reward = eval_reward
+                if total_t%self.SAVE_EVERY==0:
+                    self.save(str(total_t))
+            if total_t>max_steps:
+                break
+            ep_reward = self.env.get_normalized_score(ep_reward)*100
+            self.logger.logkv('reward', ep_reward)      
+            self.logger.set_timestep(total_t) 
+            self.logger.dumpkvs()  
+
 
     def train_continuous(self, max_steps:int, update_ratio: int=2, batch_size:int=256, k:float=20, ts:float=0.05):
         device = self.real_buffer.device
@@ -155,6 +180,7 @@ class ResidualAgentTrainer:
         self.logger.log('Training the agent')
         self.logger.log(f'Initial policy reward: {policy_reward:.2f}')
         total_t = 0
+        best_reward = 0
         while True:
             obs, done = self.env.reset(), False
             x_hat = obs # estimated state
@@ -180,8 +206,136 @@ class ResidualAgentTrainer:
                 loss = self.train_sample(update_ratio, batch_size)
                 for key,val in loss.items():
                     self.logger.logkv_mean(key, val)
+                if total_t%self.EVAL_EVERY==0:
+                    self.logger.set_timestep(total_t)
+                    eval_reward = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
+                    if eval_reward>best_reward:
+                        self.save()
+                        best_reward = eval_reward
+                if total_t%self.SAVE_EVERY==0:
+                    self.save(str(total_t))
+            if total_t>max_steps:
+                break
             ep_reward = self.env.get_normalized_score(ep_reward)*100
             self.logger.logkv('reward', ep_reward)      
-            self.evaluate(k, res_agent=True) 
             self.logger.set_timestep(total_t) 
             self.logger.dumpkvs()                   
+
+
+class AdaptiveAgentTrainer(ResidualAgentTrainer):
+    def __init__(
+            self, 
+            env: gym.Env,
+            policy: BasePolicy, 
+            dynamics: BaseDynamics, 
+            residual_agent: (SACPolicy, TD3Policy), 
+            real_buffer: ReplayBuffer, 
+            buffer: ReplayBuffer,
+            logger: Logger,
+            res_action_coef:float = 1,
+    ):
+        super.__init__(
+            env, policy, dynamics, residual_agent, real_buffer, buffer, logger, res_action_coef
+        )
+    
+    def train_episodic(self, max_steps:int, update_ratio: int=2, batch_size:int=256, k:float=20, ts:float=0.05):
+        device = self.real_buffer.device
+        policy_reward= self.evaluate(k, res_agent=False)
+        self.logger.log('Training the agent')
+        self.logger.log(f'Initial policy reward: {policy_reward:.2f}')
+        total_t = 0
+        t = 0
+        best_reward = 0
+        while True:
+            obs, done = self.env.reset(), False
+            x_hat = obs # estimated state
+            ep_reward = 0
+            ep_residual_reward = 0
+            while not done and total_t<=max_steps:
+                total_t+=1
+                policy_act = self.policy.select_action(torch.as_tensor(obs).to(device), True) # policy action
+                state = self._prepare_state(obs, x_hat, policy_act, k)
+                res_action = self.agent.select_action(torch.as_tensor(state).to(device), False)
+                action = self._prepare_action(policy_act, res_action, True) 
+                next_obs, reward, done, info = self.env.step(action)
+                pred_next_obs, *_ = self.dynamics.step(obs.reshape(1,-1), action.reshape(1,-1))
+                pred_next_obs = pred_next_obs.reshape(-1,)
+                x_hat_dot = pred_next_obs+k*(obs-x_hat)
+                next_x_hat = x_hat + x_hat_dot*ts
+                next_policy_action = self.policy.select_action(torch.as_tensor(next_obs).to(device), True)
+                next_state = self._prepare_state(next_obs, next_x_hat, next_policy_action, k)
+                res_reward = -np.mean((next_obs-pred_next_obs)**2)
+                ep_residual_reward+=res_reward
+                self.buffer.add(state, next_state, res_action, res_reward, done)
+                ep_reward+=reward
+                obs = next_obs
+                x_hat = next_x_hat 
+                # update the policy
+                n_trainint_step = update_ratio*(total_t-t)
+                self.train_epoch(n_trainint_step, batch_size)
+                if total_t%self.EVAL_EVERY==0:
+                    self.logger.set_timestep(total_t)
+                    eval_reward = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
+                    if eval_reward>best_reward:
+                        self.save()
+                        best_reward = eval_reward
+                if total_t%self.SAVE_EVERY==0:
+                    self.save(str(total_t))
+            if total_t>max_steps:
+                break
+            ep_reward = self.env.get_normalized_score(ep_reward)*100
+            self.logger.logkv('reward', ep_reward)     
+            self.logger.logkv('residual reward', ep_residual_reward) 
+            self.logger.set_timestep(total_t) 
+            self.logger.dumpkvs()
+
+    def train_continuous(self, max_steps:int, update_ratio: int=2, batch_size:int=256, k:float=20, ts:float=0.05):
+        device = self.real_buffer.device
+        policy_reward= self.evaluate(k, res_agent=False)
+        self.logger.log('Training the agent')
+        self.logger.log(f'Initial policy reward: {policy_reward:.2f}')
+        total_t = 0
+        best_reward = 0
+        while True:
+            obs, done = self.env.reset(), False
+            x_hat = obs # estimated state
+            ep_reward = 0
+            ep_residual_reward = 0
+            while not done and total_t<=max_steps:
+                total_t+=1
+                policy_act = self.policy.select_action(torch.as_tensor(obs).to(device), True) # policy action
+                state = self._prepare_state(obs, x_hat, policy_act, k)
+                res_action = self.agent.select_action(torch.as_tensor(state).to(device), False)
+                action = self._prepare_action(policy_act, res_action, True) 
+                next_obs, reward, done, info = self.env.step(action)
+                pred_next_obs, *_ = self.dynamics.step(obs.reshape(1,-1), action.reshape(1,-1))
+                pred_next_obs = pred_next_obs.reshape(-1,)
+                x_hat_dot = pred_next_obs+k*(obs-x_hat)
+                next_x_hat = x_hat + x_hat_dot*ts
+                next_policy_action = self.policy.select_action(torch.as_tensor(next_obs).to(device), True)
+                next_state = self._prepare_state(next_obs, next_x_hat, next_policy_action, k)
+                res_reward = -np.mean((next_obs-pred_next_obs)**2)
+                ep_residual_reward+=res_reward
+                self.buffer.add(state, next_state, res_action, res_reward, done)
+                ep_reward+=reward
+                obs = next_obs
+                x_hat = next_x_hat 
+                # update the policy
+                loss = self.train_sample(update_ratio, batch_size)
+                for key,val in loss.items():
+                    self.logger.logkv_mean(key, val)
+                if total_t%self.EVAL_EVERY==0:
+                    self.logger.set_timestep(total_t)
+                    eval_reward = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
+                    if eval_reward>best_reward:
+                        self.save()
+                        best_reward = eval_reward
+                if total_t%self.SAVE_EVERY==0:
+                    self.save(str(total_t))
+            if total_t>max_steps:
+                break
+            ep_reward = self.env.get_normalized_score(ep_reward)*100
+            self.logger.logkv('reward', ep_reward)     
+            self.logger.logkv('residual_reward', ep_residual_reward) 
+            self.logger.set_timestep(total_t) 
+            self.logger.dumpkvs() 

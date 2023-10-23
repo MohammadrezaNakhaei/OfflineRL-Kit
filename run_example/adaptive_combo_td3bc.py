@@ -12,7 +12,7 @@ from offlinerlkit.dynamics import EnsembleDynamics
 from offlinerlkit.utils.scaler import StandardScaler
 from offlinerlkit.utils.termination_fns import get_termination_fn
 from offlinerlkit.utils.logger import make_log_dirs, load_args
-from offlinerlkit.policy import COMBOPolicy, TD3Policy
+from offlinerlkit.policy import COMBOPolicy, TD3BCPolicy
 from offlinerlkit.buffer import ReplayBuffer
 from offlinerlkit.utils.logger import Logger
 from offlinerlkit.utils.load_dataset import qlearning_dataset
@@ -29,6 +29,7 @@ def get_args():
     parser.add_argument("--env-mode", type=str, default="complex", 
                         help='simple, semi-simple or complex environment, different types of perturbation')
     parser.add_argument("--eps", type=float, default=0.1, help='exploration noise for residual agent')
+    parser.add_argument("--alpha", type=float, default=2.5, help='regulizer term')
     parser.add_argument("--coeff-residual", type=float, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=int(5e5))
@@ -147,7 +148,7 @@ def train(mainargs=get_args(), delta_m=1):
 
     noise = GaussianNoise(0, mainargs.eps)
 
-    res_policy = TD3Policy(
+    res_policy = TD3BCPolicy(
         res_actor,
         res_critic1,
         res_critic2,
@@ -158,6 +159,7 @@ def train(mainargs=get_args(), delta_m=1):
         gamma=mainargs.gamma,
         exploration_noise=noise,
         policy_noise=0.2,
+        alpha=mainargs.alpha,
     )
 
     real_buffer = ReplayBuffer(
@@ -180,7 +182,7 @@ def train(mainargs=get_args(), delta_m=1):
     )
 
     # log
-    log_dirs = make_log_dirs(f'{args.task}-adaptive', f'{args.algo_name}_td3', args.seed, vars(mainargs), record_params=['tag'])
+    log_dirs = make_log_dirs(f'{args.task}-adaptive', f'{args.algo_name}_td3bc', args.seed, vars(mainargs), record_params=['tag'])
     # key: output file name, value: output handler type
     output_config = {
         "consoleout_backup": "stdout",

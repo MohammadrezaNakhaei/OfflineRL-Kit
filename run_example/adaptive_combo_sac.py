@@ -29,7 +29,8 @@ def get_args():
                         help='simple, semi-simple or complex environment, different types of perturbation')
     parser.add_argument("--coeff-residual", type=float, default=1)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-steps", type=int, default=int(2e5))
+    parser.add_argument("--offline-seed", type=int, default=40, help='seed of loaded offline agent')
+    parser.add_argument("--max-steps", type=int, default=int(5e5))
     parser.add_argument('--n-update', type=int, default=1, help='number of updates in each samples')
     parser.add_argument("--actor-lr", type=float, default=1e-4)
     parser.add_argument("--critic-lr", type=float, default=3e-4)
@@ -46,11 +47,12 @@ def get_args():
 
 
 def train(mainargs=get_args()):
-    load_path = f'log/{mainargs.task}/{mainargs.algo_name}/seed_{mainargs.seed}'
+    load_path = f'log/{mainargs.task}/{mainargs.algo_name}/seed_{mainargs.offline_seed}'
     args = load_args(os.path.join(load_path, 'record/hyper_param.json'))
     args.action_dim = int(args.action_dim) # when loaded from json file, default is float
     # create env and dataset
     env = gym.make(args.task)
+    eval_env = gym.make(args.task)
     dataset = qlearning_dataset(env)
     EnvMode = {
         'simple': SimpleModifiedENV,
@@ -58,15 +60,15 @@ def train(mainargs=get_args()):
         'complex': ModifiedENV,
     }
     env = EnvMode[mainargs.env_mode](env, mainargs.max_delta)
-
+    eval_env = EnvMode[mainargs.env_mode](eval_env, mainargs.max_delta)
     # seed
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    random.seed(mainargs.seed)
+    np.random.seed(mainargs.seed)
+    torch.manual_seed(mainargs.seed)
+    torch.cuda.manual_seed_all(mainargs.seed)
     torch.backends.cudnn.deterministic = True
-    env.seed(args.seed)
-
+    env.seed(mainargs.seed)
+    eval_env.seed(mainargs.seed)
     # create policy model
     actor_backbone = MLP(input_dim=np.prod(args.obs_shape), hidden_dims=args.hidden_dims)
     critic1_backbone = MLP(input_dim=np.prod(args.obs_shape) + args.action_dim, hidden_dims=args.hidden_dims)
@@ -205,13 +207,12 @@ def train(mainargs=get_args()):
     logger.log_hyperparameters(vars(args))
 
     res_agent = ResidualAgentTrainer(
-        env, policy, dynamics, res_policy, 
+        env, eval_env, policy, dynamics, res_policy, 
         real_buffer, aug_buffer, logger, 
         res_action_coef=mainargs.coeff_residual,
         )
     # res_agent.pre_train(10, 100)
     res_agent.train_continuous(mainargs.max_steps, mainargs.n_update, args.batch_size,)
-    torch.save(res_policy.state_dict(), f'{log_dirs}/model/residual_agent.pth')
 
 
 

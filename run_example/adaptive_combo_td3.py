@@ -31,6 +31,7 @@ def get_args():
     parser.add_argument("--eps", type=float, default=0.1, help='exploration noise for residual agent')
     parser.add_argument("--coeff-residual", type=float, default=1)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--offline-seed", type=int, default=40, help='seed of loaded offline agent')
     parser.add_argument("--max-steps", type=int, default=int(5e5))
     parser.add_argument('--n-update', type=int, default=1, help='number of updates in each samples')
     parser.add_argument("--actor-lr", type=float, default=1e-4)

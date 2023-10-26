@@ -75,8 +75,8 @@ class ResidualAgentTrainer:
                 
     
     @torch.no_grad()
-    def evaluate(self, k, res_agent=True, deterministic=True, ts=0.05, num_eval=20):
-        device = self.real_buffer.device
+    def evaluate(self, k:float=20, res_agent:bool=True, deterministic:bool=True, ts:float=0.05, num_eval:int=20):
+        device = self.agent.actor.device
         rewards = np.zeros(num_eval)
         for n in range(num_eval):
             obs, done = self.eval_env.reset(), False

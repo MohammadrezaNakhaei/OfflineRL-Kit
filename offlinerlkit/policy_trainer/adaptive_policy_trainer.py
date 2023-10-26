@@ -98,10 +98,7 @@ class ResidualAgentTrainer:
             rewards[n] = ep_reward
         ep_reward = self.eval_env.get_normalized_score(np.mean(rewards))*100
         std = self.eval_env.get_normalized_score(np.std(rewards))*100
-        self.logger.logkv('eval_reward', ep_reward)
-        self.logger.logkv('eval_reward_std', std)
-        self.logger.dumpkvs()
-        return ep_reward         
+        return ep_reward, std         
     
     def save(self, tag:str='best'):
         path = f'{self.logger.model_dir}/residual_agent_{tag}.pth'
@@ -128,7 +125,10 @@ class ResidualAgentTrainer:
 
     def train_episodic(self, max_steps:int, update_ratio: int=2, batch_size:int=256, k:float=20, ts:float=0.05):
         device = self.real_buffer.device
-        policy_reward= self.evaluate(k, res_agent=False)
+        policy_reward, std = self.evaluate(k, res_agent=False)
+        self.logger.logkv('eval_reward', policy_reward)
+        self.logger.logkv('eval_reward_std', std)
+        self.logger.dumpkvs()
         self.logger.log('Training the agent')
         self.logger.log(f'Initial policy reward: {policy_reward:.2f}')
         total_t = 0
@@ -159,8 +159,11 @@ class ResidualAgentTrainer:
                 n_trainint_step = update_ratio*(total_t-t)
                 self.train_epoch(n_trainint_step, batch_size)
                 if total_t%self.EVAL_EVERY==0:
+                    eval_reward, std = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
                     self.logger.set_timestep(total_t)
-                    eval_reward = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
+                    self.logger.logkv('eval_reward', eval_reward)
+                    self.logger.logkv('eval_reward_std', std)  
+                    self.logger.dumpkvs() 
                     if eval_reward>best_reward:
                         self.save()
                         best_reward = eval_reward
@@ -176,7 +179,10 @@ class ResidualAgentTrainer:
 
     def train_continuous(self, max_steps:int, update_ratio: int=2, batch_size:int=256, k:float=20, ts:float=0.05):
         device = self.real_buffer.device
-        policy_reward= self.evaluate(k, res_agent=False)
+        policy_reward, std = self.evaluate(k, res_agent=False)
+        self.logger.logkv('eval_reward', policy_reward)
+        self.logger.logkv('eval_reward_std', std)  
+        self.logger.dumpkvs()
         self.logger.log('Training the agent')
         self.logger.log(f'Initial policy reward: {policy_reward:.2f}')
         total_t = 0
@@ -207,8 +213,11 @@ class ResidualAgentTrainer:
                 for key,val in loss.items():
                     self.logger.logkv_mean(key, val)
                 if total_t%self.EVAL_EVERY==0:
+                    eval_reward, std = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
                     self.logger.set_timestep(total_t)
-                    eval_reward = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
+                    self.logger.logkv('eval_reward', eval_reward)
+                    self.logger.logkv('eval_reward_std', std)  
+                    self.logger.dumpkvs()
                     if eval_reward>best_reward:
                         self.save()
                         best_reward = eval_reward
@@ -240,7 +249,10 @@ class AdaptiveAgentTrainer(ResidualAgentTrainer):
     
     def train_episodic(self, max_steps:int, update_ratio: int=2, batch_size:int=256, k:float=20, ts:float=0.05):
         device = self.real_buffer.device
-        policy_reward= self.evaluate(k, res_agent=False)
+        policy_reward, std = self.evaluate(k, res_agent=False)
+        self.logger.logkv('eval_reward', eval_reward)
+        self.logger.logkv('eval_reward_std', std)  
+        self.logger.dumpkvs()
         self.logger.log('Training the agent')
         self.logger.log(f'Initial policy reward: {policy_reward:.2f}')
         total_t = 0
@@ -274,8 +286,11 @@ class AdaptiveAgentTrainer(ResidualAgentTrainer):
                 n_trainint_step = update_ratio*(total_t-t)
                 self.train_epoch(n_trainint_step, batch_size)
                 if total_t%self.EVAL_EVERY==0:
+                    eval_reward, std = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
                     self.logger.set_timestep(total_t)
-                    eval_reward = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
+                    self.logger.logkv('eval_reward', eval_reward)
+                    self.logger.logkv('eval_reward_std', std)  
+                    self.logger.dumpkvs()
                     if eval_reward>best_reward:
                         self.save()
                         best_reward = eval_reward
@@ -291,7 +306,10 @@ class AdaptiveAgentTrainer(ResidualAgentTrainer):
 
     def train_continuous(self, max_steps:int, update_ratio: int=2, batch_size:int=256, k:float=20, ts:float=0.05):
         device = self.real_buffer.device
-        policy_reward= self.evaluate(k, res_agent=False)
+        policy_reward, std= self.evaluate(k, res_agent=False)
+        self.logger.logkv('eval_reward', policy_reward)
+        self.logger.logkv('eval_reward_std', std)  
+        self.logger.dumpkvs()
         self.logger.log('Training the agent')
         self.logger.log(f'Initial policy reward: {policy_reward:.2f}')
         total_t = 0
@@ -324,9 +342,14 @@ class AdaptiveAgentTrainer(ResidualAgentTrainer):
                 loss = self.train_sample(update_ratio, batch_size)
                 for key,val in loss.items():
                     self.logger.logkv_mean(key, val)
+                    
                 if total_t%self.EVAL_EVERY==0:
                     self.logger.set_timestep(total_t)
-                    eval_reward = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
+                    eval_reward, std = self.evaluate(k, res_agent=True, deterministic=True, ts=ts, num_eval=20)
+                    self.logger.set_timestep(total_t)
+                    self.logger.logkv('eval_reward', eval_reward)
+                    self.logger.logkv('eval_reward_std', std)  
+                    self.logger.dumpkvs()
                     if eval_reward>best_reward:
                         self.save()
                         best_reward = eval_reward

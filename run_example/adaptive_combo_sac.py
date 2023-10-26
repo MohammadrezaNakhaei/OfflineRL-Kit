@@ -195,7 +195,7 @@ def train(mainargs=get_args()):
     )
 
     # log
-    log_dirs = make_log_dirs(f'{args.task}-adaptive', f'{args.algo_name}_sac', args.seed, vars(mainargs), record_params=['tag'])
+    log_dirs = make_log_dirs(f'{args.task}-adaptive', f'{args.algo_name}_sac', mainargs.seed, vars(mainargs), record_params=['tag'])
     # key: output file name, value: output handler type
     output_config = {
         "consoleout_backup": "stdout",

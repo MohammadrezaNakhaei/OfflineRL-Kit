@@ -201,7 +201,6 @@ def train(mainargs=get_args()):
     output_config = {
         "consoleout_backup": "stdout",
         "policy_training_progress": "csv",
-        "dynamics_training_progress": "csv",
         "tb": "tensorboard"
     }
     logger = Logger(log_dirs, output_config)
@@ -213,7 +212,7 @@ def train(mainargs=get_args()):
         res_action_coef=mainargs.coeff_residual,
         )
     # res_agent.pre_train(10, 100)
-    res_agent.train_continuous(mainargs.max_steps, mainargs.n_update, args.batch_size, k=args.k)
+    res_agent.train_continuous(mainargs.max_steps, mainargs.n_update, args.batch_size, k=mainargs.k)
 
 
 

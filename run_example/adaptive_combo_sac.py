@@ -17,7 +17,7 @@ from offlinerlkit.buffer import ReplayBuffer
 from offlinerlkit.utils.logger import Logger
 from offlinerlkit.utils.load_dataset import qlearning_dataset
 from offlinerlkit.utils.modify_env import ModifiedENV, SemiSimpleModifiedENV, SimpleModifiedENV
-from offlinerlkit.policy_trainer import ResidualAgentTrainer
+from offlinerlkit.policy_trainer import ResidualAgentTrainer,AdaptiveAgentTrainer
 
 
 def get_args():
@@ -31,6 +31,7 @@ def get_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--offline-seed", type=int, default=40, help='seed of loaded offline agent')
     parser.add_argument("--max-steps", type=int, default=int(5e5))
+    parser.add_argument("--k", type=float, default=0.1, help='adaptation gain')
     parser.add_argument('--n-update', type=int, default=1, help='number of updates in each samples')
     parser.add_argument("--actor-lr", type=float, default=1e-4)
     parser.add_argument("--critic-lr", type=float, default=3e-4)
@@ -212,7 +213,7 @@ def train(mainargs=get_args()):
         res_action_coef=mainargs.coeff_residual,
         )
     # res_agent.pre_train(10, 100)
-    res_agent.train_continuous(mainargs.max_steps, mainargs.n_update, args.batch_size,)
+    res_agent.train_continuous(mainargs.max_steps, mainargs.n_update, args.batch_size, k=args.k)
 
 
 

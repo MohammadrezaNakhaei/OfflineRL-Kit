@@ -30,6 +30,7 @@ def get_args():
                         help='simple, semi-simple or complex environment, different types of perturbation')
     parser.add_argument("--eps", type=float, default=0.1, help='exploration noise for residual agent')
     parser.add_argument("--coeff-residual", type=float, default=1)
+    parser.add_argument("--k", type=float, default=0.1, help='adaptation gain')
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--offline-seed", type=int, default=40, help='seed of loaded offline agent')
     parser.add_argument("--max-steps", type=int, default=int(5e5))
@@ -197,7 +198,7 @@ def train(mainargs=get_args(), delta_m=1):
         real_buffer, aug_buffer, logger, 
         res_action_coef=mainargs.coeff_residual,
         )    
-    res_agent.train_continuous(mainargs.max_steps, mainargs.n_update, args.batch_size,)
+    res_agent.train_continuous(mainargs.max_steps, mainargs.n_update, args.batch_size, k=mainargs.k)
     torch.save(res_policy.state_dict(), f'{log_dirs}/model/residual_agent.pth')
 
 

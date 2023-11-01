@@ -92,7 +92,7 @@ class ResidualAgentTrainer:
         return num_timesteps
     
     def _prepare_state(self, obs, x_hat, policy_act, k=None):
-        return np.concatenate([obs, x_hat, policy_act], -1)
+        return np.concatenate([obs, obs-x_hat, policy_act], -1)
     
     def _prepare_action(self, policy_action, res_action, residual_agent=True):
         if residual_agent:

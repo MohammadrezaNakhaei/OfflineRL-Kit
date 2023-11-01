@@ -7,6 +7,31 @@ from offlinerlkit.dynamics import BaseDynamics
 from offlinerlkit.utils.logger import Logger
 from offlinerlkit.policy import BasePolicy, SACPolicy, TD3Policy
 from offlinerlkit.buffer import ReplayBuffer
+from typing import Tuple
+
+class Normalizer():
+    def __init__(self, shape:Tuple[int], eps:float=1e-2):
+        self.mean = np.zeros(shape, dtype=np.float32)
+        self.std = np.ones(shape, dtype=np.float32)
+        self.counts = eps
+        self.total_sum = np.zeros(shape, dtype=np.float32)
+        self.total_sumsq = np.zeros(shape, dtype=np.float32)
+
+    def update(self, batch: np.ndarray):
+        assert batch.ndim == 2
+        self.total_sum += np.sum(batch, axis=0)
+        self.total_sumsq += np.sum(batch**2, axis=0)
+        self.counts+=batch.shape[0]
+        self.std = np.sqrt((self.total_sumsq / self.counts) - np.square(self.total_sum / self.counts))
+
+    def normalize(self, state: np.ndarray):
+        return (state-self.mean)/self.std
+    
+    def normalize_torch(self, state: torch.Tensor, device='cpu'):
+        mean = torch.from_numpy(self.mean).to(device)
+        std = torch.from_numpy(self.std).to(device)
+        return (state-mean)/std
+
 
 
 class ResidualAgentTrainer:
@@ -33,6 +58,8 @@ class ResidualAgentTrainer:
         self.real_buffer = real_buffer
         self.logger = logger
         self.res_action_coef = res_action_coef
+        self.normalizer = Normalizer(self.buffer.obs_shape)
+        self.device = self.real_buffer.device
 
     def pre_train(self, num_epoch:int, step_per_epoch: int, batch_size:int=256):
         self.agent.train()
@@ -85,7 +112,8 @@ class ResidualAgentTrainer:
             while not done:
                 policy_act = self.policy.select_action(torch.as_tensor(obs).to(device), True) # policy action
                 state = self._prepare_state(obs, x_hat, policy_act, k)
-                res_action = self.agent.select_action(torch.as_tensor(state).to(device), deterministic)
+                normalized_state = self.normalizer.normalize(state)
+                res_action = self.agent.select_action(torch.as_tensor(normalized_state).to(device), deterministic)
                 action = self._prepare_action(policy_act, res_action, res_agent) 
                 next_obs, reward, done, info = self.eval_env.step(action)
                 pred_next_obs, *_ = self.dynamics.step(obs.reshape(1,-1), action.reshape(1,-1))
@@ -98,7 +126,7 @@ class ResidualAgentTrainer:
             rewards[n] = ep_reward
         ep_reward = self.eval_env.get_normalized_score(np.mean(rewards))*100
         std = self.eval_env.get_normalized_score(np.std(rewards))*100
-        return ep_reward, std        
+        return ep_reward, std       
     
     def save(self, tag:str='best'):
         path = f'{self.logger.model_dir}/residual_agent_{tag}.pth'
@@ -110,6 +138,8 @@ class ResidualAgentTrainer:
         pbar = tqdm(range(num_step),)
         for i in pbar:
             batch = self.buffer.sample(batch_size)
+            batch['observations'] = self.normalizer.normalize_torch(batch['observations'], self.device)
+            batch['next_observations'] = self.normalizer.normalize_torch(batch['next_observations'], self.device)
             loss = self.agent.learn(batch)
             for k, v in loss.items():
                 self.logger.logkv_mean(k, v)
@@ -119,6 +149,8 @@ class ResidualAgentTrainer:
         self.agent.train()
         for i in range(num_step):
             batch = self.buffer.sample(batch_size)
+            batch['observations'] = self.normalizer.normalize_torch(batch['observations'], self.device)
+            batch['next_observations'] = self.normalizer.normalize_torch(batch['next_observations'], self.device)
             loss = self.agent.learn(batch)
         return loss
         
@@ -142,7 +174,9 @@ class ResidualAgentTrainer:
                 total_t+=1
                 policy_act = self.policy.select_action(torch.as_tensor(obs).to(device), True) # policy action
                 state = self._prepare_state(obs, x_hat, policy_act, k)
-                res_action = self.agent.select_action(torch.as_tensor(state).to(device), False)
+                self.normalizer.update(state.reshape(1,-1)) # add batch dimention
+                normalized_state = self.normalizer.normalize(state)
+                res_action = self.agent.select_action(torch.as_tensor(normalized_state).to(device), False)
                 action = self._prepare_action(policy_act, res_action, True) 
                 next_obs, reward, done, info = self.env.step(action)
                 pred_next_obs, *_ = self.dynamics.step(obs.reshape(1,-1), action.reshape(1,-1))
@@ -195,7 +229,9 @@ class ResidualAgentTrainer:
                 total_t+=1
                 policy_act = self.policy.select_action(torch.as_tensor(obs).to(device), True) # policy action
                 state = self._prepare_state(obs, x_hat, policy_act, k)
-                res_action = self.agent.select_action(torch.as_tensor(state).to(device), False)
+                self.normalizer.update(state.reshape(1,-1)) # add batch dimention
+                normalized_state = self.normalizer.normalize(state)
+                res_action = self.agent.select_action(torch.as_tensor(normalized_state).to(device), False)
                 action = self._prepare_action(policy_act, res_action, True) 
                 next_obs, reward, done, info = self.env.step(action)
                 pred_next_obs, *_ = self.dynamics.step(obs.reshape(1,-1), action.reshape(1,-1))

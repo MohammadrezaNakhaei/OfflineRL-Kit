@@ -11,6 +11,7 @@ from offlinerlkit.buffer import ReplayBuffer
 from typing import Tuple
 
 class Normalizer():
+    warmp_up = 200
     def __init__(self, shape:Tuple[int], eps:float=1e-2):
         self.mean = np.zeros(shape, dtype=np.float32)
         self.std = np.ones(shape, dtype=np.float32)
@@ -23,7 +24,9 @@ class Normalizer():
         self.total_sum += np.sum(batch, axis=0)
         self.total_sumsq += np.sum(batch**2, axis=0)
         self.counts+=batch.shape[0]
-        self.std = np.sqrt((self.total_sumsq / self.counts) - np.square(self.total_sum / self.counts))
+        if self.counts>self.warmp_up:
+            self.std = np.sqrt((self.total_sumsq / self.counts) - np.square(self.total_sum / self.counts))
+            self.mean = self.total_sum/self.counts
 
     def normalize(self, state: np.ndarray):
         return (state-self.mean)/self.std

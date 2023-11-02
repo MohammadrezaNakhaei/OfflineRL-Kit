@@ -2,6 +2,7 @@ import gym
 import numpy as np
 import torch
 from tqdm import tqdm
+import pickle
 
 from offlinerlkit.dynamics import BaseDynamics
 from offlinerlkit.utils.logger import Logger
@@ -130,7 +131,10 @@ class ResidualAgentTrainer:
     
     def save(self, tag:str='best'):
         path = f'{self.logger.model_dir}/residual_agent_{tag}.pth'
+        path_normalizer = f'{self.logger.model_dir}/normalizer_{tag}.pkl'
         torch.save(self.agent.state_dict(), path)
+        with open(path_normalizer, 'wb') as f:
+            pickle.dump(self.normalizer, f, pickle.HIGHEST_PROTOCOL)
 
     
     def train_epoch(self, num_step:int, batch_size:int=256):

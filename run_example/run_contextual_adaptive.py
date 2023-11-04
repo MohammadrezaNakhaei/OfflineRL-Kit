@@ -13,12 +13,11 @@ from offlinerlkit.utils.scaler import StandardScaler
 from offlinerlkit.utils.termination_fns import get_termination_fn
 from offlinerlkit.utils.logger import make_log_dirs, load_args
 from offlinerlkit.policy import COMBOPolicy, SACPolicy
-from offlinerlkit.buffer import ReplayBuffer
+from offlinerlkit.buffer import NSequenceBuffer
 from offlinerlkit.utils.logger import Logger
-from offlinerlkit.utils.load_dataset import qlearning_dataset
 from offlinerlkit.utils.modify_env import ModifiedENV, SemiSimpleModifiedENV, SimpleModifiedENV
-from offlinerlkit.policy_trainer import ResidualAgentTrainer
-
+from offlinerlkit.policy_trainer import ContextAgentTrainer
+from offlinerlkit.nets import ContextEncoder, ContextPredictor, EncoderModule
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -27,10 +26,9 @@ def get_args():
     parser.add_argument("--max-delta", type=float, default=0.2, help='maximum perturbation in mass')
     parser.add_argument("--env-mode", type=str, default="complex", 
                         help='simple, semi-simple or complex environment, different types of perturbation')
-    parser.add_argument("--coeff-residual", type=float, default=1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--offline-seed", type=int, default=40, help='seed of loaded offline agent')
-    parser.add_argument("--max-steps", type=int, default=int(5e5))
+    parser.add_argument("--max-steps", type=int, default=int(1e6))
     parser.add_argument('--n-update', type=int, default=1, help='number of updates in each samples')
     parser.add_argument("--actor-lr", type=float, default=1e-4)
     parser.add_argument("--critic-lr", type=float, default=3e-4)
@@ -41,8 +39,19 @@ def get_args():
     parser.add_argument("--auto-alpha", default=True)
     parser.add_argument("--target-entropy", type=int, default=None)
     parser.add_argument("--alpha-lr", type=float, default=1e-4)    
-    parser.add_argument("--buffer-size", type=int, default=100000)
-    parser.add_argument("--tag", type=str, default='')
+    parser.add_argument("--buffer-size", type=int, default=100, help='number of trajectories in the buffer') 
+    parser.add_argument("--latent-dim", type=int, default=8, help='encoder output dim')
+    parser.add_argument("--seq-len", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument('--num-workers', type=int, default=4, help='number of cpu cores used to prepare data')
+    parser.add_argument("--encoder-layers", type=int, default=1, help='number of layers in encoder (transformer)')
+    parser.add_argument("--encoder-heads", type=int, default=4, help='number of heads in multi-head attention')
+    parser.add_argument("--encoder-lr", type=float, default=1e-4, help='learning rate for encoder')
+    parser.add_argument("--encoder-points", type=int, default=4, 
+                        help='number of subtrajectories used to train the encoder, mean value is used for training')
+    parser.add_argument("--hidden-dims-predictor", type=int, nargs='*', default=[256, 256])
+    parser.add_argument("--tag", type=str, default='', help='used for logging')
+    
     return parser.parse_args()
 
 
@@ -59,7 +68,7 @@ def train(mainargs=get_args()):
         'complex': ModifiedENV,
     }
     env = EnvMode[mainargs.env_mode](env, mainargs.max_delta)
-    eval_env = SimpleModifiedENV(eval_env, mainargs.max_delta)
+    eval_env = EnvMode[mainargs.env_mode](eval_env, mainargs.max_delta)
     # seed
     random.seed(mainargs.seed)
     np.random.seed(mainargs.seed)
@@ -135,9 +144,31 @@ def train(mainargs=get_args()):
     
     policy.load_state_dict(torch.load(f'{load_path}/checkpoint/policy.pth'))
 
-    res_actor_backbone = MLP(input_dim=2*np.prod(args.obs_shape)+args.action_dim, hidden_dims=mainargs.hidden_dims)
-    res_critic1_backbone = MLP(input_dim=2*np.prod(args.obs_shape)+2*args.action_dim, hidden_dims=mainargs.hidden_dims)
-    res_critic2_backbone = MLP(input_dim=2*np.prod(args.obs_shape)+2*args.action_dim, hidden_dims=mainargs.hidden_dims)
+    encoder = ContextEncoder(
+        state_dim = np.prod(args.obs_shape), 
+        action_dim = args.action_dim, 
+        seq_len = mainargs.seq_len, 
+        output_dim = mainargs.latent_dim, 
+        num_layers=mainargs.encoder_layers,
+        num_heads=mainargs.encoder_heads,
+        )
+    predictor = ContextPredictor(
+        state_dim = np.prod(args.obs_shape), 
+        action_dim = args.action_dim, 
+        latent_dim = mainargs.latent_dim, 
+        hidden_dim = mainargs.hidden_dims_predictor       
+    )
+    encoder.to(args.device)
+    predictor.to(args.device)
+    encoder_module = EncoderModule(encoder, predictor, lr=mainargs.encoder_lr)
+    buffer = NSequenceBuffer(mainargs.buffer_size, mainargs.seq_len, mainargs.encoder_points)
+    obs_shape_res = np.prod(args.obs_shape) + args.action_dim + mainargs.latent_dim
+
+
+
+    res_actor_backbone = MLP(input_dim=obs_shape_res, hidden_dims=mainargs.hidden_dims)
+    res_critic1_backbone = MLP(input_dim=obs_shape_res+args.action_dim, hidden_dims=mainargs.hidden_dims)
+    res_critic2_backbone = MLP(input_dim=obs_shape_res+args.action_dim, hidden_dims=mainargs.hidden_dims)
     res_dist = TanhDiagGaussian(
         latent_dim=getattr(actor_backbone, "output_dim"),
         output_dim=args.action_dim,
@@ -147,10 +178,19 @@ def train(mainargs=get_args()):
     res_actor = ActorProb(res_actor_backbone, res_dist, args.device)
     res_critic1 = Critic(res_critic1_backbone, args.device)
     res_critic2 = Critic(res_critic2_backbone, args.device)
-    res_actor_optim = None
-    res_critic1_optim = None
-    res_critic2_optim = None
-    alpha = None
+    res_actor_optim = torch.optim.Adam(res_actor.parameters(), lr=mainargs.actor_lr)
+    res_critic1_optim = torch.optim.Adam(res_critic1.parameters(), lr=mainargs.critic_lr)
+    res_critic2_optim = torch.optim.Adam(res_critic2.parameters(), lr=mainargs.critic_lr)   
+
+    if mainargs.auto_alpha:
+        target_entropy = mainargs.target_entropy if mainargs.target_entropy \
+            else -np.prod(env.action_space.shape)
+        mainargs.target_entropy = target_entropy
+        log_alpha = torch.zeros(1, requires_grad=True, device=args.device)
+        alpha_optim = torch.optim.Adam([log_alpha], lr=mainargs.alpha_lr)
+        alpha = (target_entropy, log_alpha, alpha_optim)
+    else:
+        alpha = mainargs.alpha
 
     res_policy = SACPolicy(
         res_actor,
@@ -165,43 +205,30 @@ def train(mainargs=get_args()):
     )
 
     
-    real_buffer = None
-    aug_buffer = None
 
     # log
-    log_dirs = make_log_dirs(f'{args.task}-adaptive', f'{args.algo_name}_sac', mainargs.seed, vars(mainargs), record_params=['tag'])
+    log_dirs = make_log_dirs(f'{args.task}-context', f'{args.algo_name}_sac', mainargs.seed, vars(mainargs), record_params=['tag'])
     # key: output file name, value: output handler type
-    logger = None
-    res_policy.state_dict(torch.load(f'{log_dirs}/model/residual_agent_best.pth'))
-    res_agent = ResidualAgentTrainer(
-        env, eval_env, policy, dynamics, res_policy, 
-        real_buffer, aug_buffer, logger, 
-        res_action_coef=mainargs.coeff_residual,
-        )    
-        
-    reward_offline, std_offline, states, estimations = res_agent.evaluate(res_agent=False, num_eval=1,k=0.1)
-    import matplotlib.pyplot as plt
-    import matplotlib
-    matplotlib.use('TkAgg')
-    print(states.shape[1])
-    plt.figure(figsize=(4, 25))
-    plt.suptitle(args.task.split('-')[0], fontweight='bold')
-    for i in range(states.shape[1]):
-        plt.subplot(states.shape[1], 1 ,i+1)
-        plt.plot(states[:,i], 'b')
-        plt.plot(estimations[:,i], 'r--')
-        plt.ylabel(f'state {i}', fontsize=8)
-        plt.tight_layout()
-    plt.xlabel('times step')
-    plt.show()
+    output_config = {
+        "consoleout_backup": "stdout",
+        "policy_training_progress": "csv",
+        "tb": "tensorboard"
+    }
+    logger = Logger(log_dirs, output_config)
+    logger.log_hyperparameters(vars(args))
 
+    res_agent = ContextAgentTrainer(
+        env = env, eval_env = eval_env, policy = policy,
+        residual_agent = res_policy, encoder = encoder_module,
+        buffer=buffer, logger=logger, 
+        batch_size = mainargs.batch_size, 
+        num_worker = mainargs.num_workers,
+        seq_len = mainargs.seq_len,
+        device=args.device,
+        )
+    # res_agent.pre_train(10, 100)
+    res_agent.run(max_step=mainargs.max_steps)
 
-    # reward_residual, std_residual = res_agent.evaluate(res_agent=True)
-
-    # print('\nOffline Policy')
-    # print(f'avg reward: {reward_offline} \t std: {std_offline}')
-    # print('\nResidual Policy')
-    # print(f'avg reward: {reward_residual} \t std: {std_residual}')
 
 
 if __name__ == '__main__':

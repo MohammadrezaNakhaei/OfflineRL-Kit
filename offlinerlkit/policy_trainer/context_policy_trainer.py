@@ -23,7 +23,8 @@ class ContextAgentTrainer:
             num_worker: int=4,
             batch_size: int=64,
             seq_len: int=10,
-            device: str='cpu'
+            device: str='cpu', 
+            coeff:float = 0.9,
     ):
         self.env = env
         self.eval_env = eval_env
@@ -39,6 +40,7 @@ class ContextAgentTrainer:
         self.agent.to(device)
         self.policy.to(device)
         self.total_t = 0
+        self.coeff = coeff
 
     # collect data only using offline policy
     def warm_up(self, n_episodes:int=20):
@@ -87,7 +89,8 @@ class ContextAgentTrainer:
                     with torch.no_grad():
                         encoded = self.encoder(context_state, context_actions, time_step).squeeze(0) # context encoder
                         res_state = self._res_state(obs_tensor, offline_act, encoded) # augmented state
-                        action = self.agent.select_action(res_state, deterministic=deterministic) 
+                        res_action = self.agent.select_action(res_state, deterministic=deterministic) 
+                        action = self._total_action(offline_act.cpu().numpy(), res_action)
                 obs, reward, done, info = self.eval_env.step(action)
                 ep_actions.append(action)
                 ep_states.append(obs)
@@ -99,6 +102,12 @@ class ContextAgentTrainer:
 
     def _res_state(self, obs:torch.Tensor, policy_action:torch.Tensor, encoded:torch.Tensor):
         return torch.cat([obs, policy_action, encoded], dim=-1)
+    
+    def _total_action(self, offline_action, context_action):
+        return self.coeff*offline_action + (1-self.coeff)*context_action
+    
+    def _agent_action(self, total_action, offline_action):
+        return (total_action-self.coeff*offline_action)/(1-self.coeff)
     
     def _prepare_training_samples(self, device:str='cpu'):
         batch = next(self.train_iter)
@@ -120,7 +129,7 @@ class ContextAgentTrainer:
         next_observations = self._res_state(next_state, next_offline_act, latents)
         batch_agent = dict(
             observations = observations,
-            actions = action,
+            actions = self._agent_action(action, offline_act),
             next_observations=next_observations,
             rewards = reward,
             terminals = done.to(torch.float32),
@@ -181,7 +190,8 @@ class ContextAgentTrainer:
                     with torch.no_grad():
                         encoded = self.encoder(context_state, context_actions, time_step).squeeze(0) # context encoder, remove batch dim
                         res_state = self._res_state(obs_tensor, offline_act, encoded) # augmented state
-                        action = self.agent.select_action(res_state) 
+                        res_action = self.agent.select_action(res_state)
+                        action = self._total_action(offline_act.cpu().numpy(), res_action)
                 obs, reward, done, info = self.env.step(action)
                 ep_states.append(obs)
                 ep_actions.append(action)

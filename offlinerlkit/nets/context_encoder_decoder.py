@@ -109,10 +109,12 @@ class ContextPredictor(nn.Module):
 
 
 class EncoderModule():
-    def __init__(self, encoder: ContextEncoder, predictor: ContextPredictor, lr:float=1e-4):
+    def __init__(self, encoder: ContextEncoder, predictor: ContextPredictor, lr:float=1e-4, alpha_sim:float=0.2, beta_dif:float=0.1):
         self.encoder = encoder
         self.predictor = predictor
         self.optimizer = torch.optim.Adam(list(encoder.parameters())+list(predictor.parameters()), lr)
+        self.alpha_sim = alpha_sim
+        self.beta_dif = beta_dif
     
     def __call__(self, seq_state:torch.Tensor, seq_action:torch.Tensor, time_step:torch.Tensor):
         return self.encode(seq_state, seq_action, time_step)
@@ -145,13 +147,33 @@ class EncoderModule():
         action = batch['action']
         next_state = batch['next_state']
         latents = self.encode_multiple(seq_states, seq_actions, seq_masks)
+        
         predicted_state = self.predictor(state, action, latents.mean(1)) # predict according to the mean of latents
         self.optimizer.zero_grad()
-        loss = F.mse_loss(predicted_state, next_state-state)
+        # loss = cos(predicted_state, next_state-state).sum()
+        loss_sim = cosine_N(latents, dim=1).mean() # similar to N points
+        loss_dif = -cosine_N(latents, dim=0).mean() # different in batches
+        loss_pred = F.mse_loss(predicted_state, next_state-state)
+        loss = loss_pred + self.alpha_sim*loss_sim + self.beta_dif*loss_dif
         loss.backward()
         self.optimizer.step()
-        return {'loss/encoder_prediction': loss.item()}
+        return {
+            'loss/encoder_prediction': loss_pred.item(), 
+            'loss/encoder_similarity':loss_sim.item(),
+            'loss/encoder_difference': loss_dif.item(),
+            }
     
     def train(self, ):
         self.encoder.train()
         self.predictor.train()
+
+def cosine(pred, target, reduce=False):
+    x = F.normalize(pred, dim=-1, p=2)
+    y = F.normalize(target, dim=-1, p=2)
+
+    return 2 - 2*(x * y).sum(dim=-1, keepdim=(not reduce))
+
+def cosine_N(tensors, dim=1):
+    x = F.normalize(tensors, dim=-1, p=2) 
+    x = -x.prod(dim)
+    return x.sum(-1)

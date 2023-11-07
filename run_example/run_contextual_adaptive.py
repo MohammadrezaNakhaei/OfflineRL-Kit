@@ -15,7 +15,7 @@ from offlinerlkit.utils.logger import make_log_dirs, load_args
 from offlinerlkit.policy import COMBOPolicy, SACPolicy
 from offlinerlkit.buffer import NSequenceBuffer
 from offlinerlkit.utils.logger import Logger
-from offlinerlkit.utils.modify_env import ModifiedENV, SemiSimpleModifiedENV, SimpleModifiedENV
+from offlinerlkit.utils.modify_env import ModifiedENV, SemiSimpleModifiedENV, SimpleModifiedENV, MassDampingENV
 from offlinerlkit.policy_trainer import ContextAgentTrainer
 from offlinerlkit.nets import ContextEncoder, ContextPredictor, EncoderModule
 
@@ -24,8 +24,8 @@ def get_args():
     parser.add_argument("--algo-name", type=str, default="combo")
     parser.add_argument("--task", type=str, default="hopper-medium-v2")
     parser.add_argument("--max-delta", type=float, default=0.2, help='maximum perturbation in mass')
-    parser.add_argument("--env-mode", type=str, default="complex", 
-                        help='simple, semi-simple or complex environment, different types of perturbation')
+    parser.add_argument("--env-mode", type=str, default="def", 
+                        help='def, simple, semi-simple or complex environment, different types of perturbation')
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--offline-seed", type=int, default=40, help='seed of loaded offline agent')
     parser.add_argument("--max-steps", type=int, default=int(1e6))
@@ -49,7 +49,10 @@ def get_args():
     parser.add_argument("--encoder-lr", type=float, default=1e-4, help='learning rate for encoder')
     parser.add_argument("--encoder-points", type=int, default=4, 
                         help='number of subtrajectories used to train the encoder, mean value is used for training')
+    parser.add_argument("--coeff", type=float, default=0.9, help='coefficient for context/offline actions')
     parser.add_argument("--hidden-dims-predictor", type=int, nargs='*', default=[256, 256])
+    parser.add_argument("--loss-sim", type=float, default=0.2, help='Coefficient for similarity loss in N points from one trajectory')
+    parser.add_argument("--loss-diff", type=float, default=0.1, help='Coefficient for non-similarity for different batches')
     parser.add_argument("--tag", type=str, default='', help='used for logging')
     
     return parser.parse_args()
@@ -66,6 +69,7 @@ def train(mainargs=get_args()):
         'simple': SimpleModifiedENV,
         'semi-simple': SemiSimpleModifiedENV,
         'complex': ModifiedENV,
+        'def': MassDampingENV
     }
     env = EnvMode[mainargs.env_mode](env, mainargs.max_delta)
     eval_env = EnvMode[mainargs.env_mode](eval_env, mainargs.max_delta)
@@ -160,7 +164,11 @@ def train(mainargs=get_args()):
     )
     encoder.to(args.device)
     predictor.to(args.device)
-    encoder_module = EncoderModule(encoder, predictor, lr=mainargs.encoder_lr)
+    encoder_module = EncoderModule(
+        encoder, predictor, lr=mainargs.encoder_lr, 
+        alpha_sim=mainargs.loss_sim, 
+        beta_dif=mainargs.loss_diff
+        )
     buffer = NSequenceBuffer(mainargs.buffer_size, mainargs.seq_len, mainargs.encoder_points)
     obs_shape_res = np.prod(args.obs_shape) + args.action_dim + mainargs.latent_dim
 
@@ -225,6 +233,7 @@ def train(mainargs=get_args()):
         num_worker = mainargs.num_workers,
         seq_len = mainargs.seq_len,
         device=args.device,
+        coeff=mainargs.coeff,
         )
     # res_agent.pre_train(10, 100)
     res_agent.run(max_step=mainargs.max_steps)

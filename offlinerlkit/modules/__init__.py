@@ -4,7 +4,7 @@ from offlinerlkit.modules.ensemble_critic_module import EnsembleCritic
 from offlinerlkit.modules.dist_module import DiagGaussian, TanhDiagGaussian
 from offlinerlkit.modules.dynamics_module import EnsembleDynamicsModel, DecoupledDynamicsModel, KoopmanDynamicModel
 from offlinerlkit.modules.seq_dynamics_module import GPTDynamicsModel
-
+from offlinerlkit.modules.reward_model import RewardModel
 __all__ = [
     "Actor",
     "ActorProb",
@@ -16,4 +16,5 @@ __all__ = [
     "GPTDynamicsModel",
     "DecoupledDynamicsModel", 
     "KoopmanDynamicModel",
+    "RewardModel"
 ]

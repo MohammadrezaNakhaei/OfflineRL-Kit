@@ -138,7 +138,7 @@ class EncoderModule():
         latents = latents.view(B, N, -1)
         return latents           
     
-    def learn_batch(self, batch:MutableMapping[str, torch.Tensor]):
+    def learn_batch(self, batch:MutableMapping[str, torch.Tensor], k=None):
         # currently no contrastive loss, only consider the mean of latent space
         seq_states = batch['seq_states']
         seq_actions = batch['seq_actions']
@@ -148,17 +148,29 @@ class EncoderModule():
         next_state = batch['next_state']
         latents = self.encode_multiple(seq_states, seq_actions, seq_masks)
         B, N, T, _ = seq_states.shape
+        if k is None:
+            k = T//2
+        assert k<T
         # states = seq_states[:, :, 0:-1].reshape(B*N*(T-1),-1)
         # actions = seq_actions[:, :, 0:-1].reshape(B*N*(T-1),-1)
         # next_states = seq_states[:, :, 1:].reshape(B*N*(T-1),-1)
         idx = np.random.randint(N)
-        predicted_state = self.predictor(state, action, latents[:,idx]) # predict according to the mean of latents
+        predicted_state = self.predictor(state, action, latents[:,idx])
         # predicted_states = self.predictor(states, actions, latents.mean(1).repeat(N*(T-1),1))
 
         self.optimizer.zero_grad()
         # loss = cos(predicted_state, next_state-state).sum()
         loss_sim = similarity_loss(latents) # similar to N points
         loss_pred = F.mse_loss(predicted_state, next_state-state)
+        
+        # kstep prediction loss
+        state = seq_states[:, :, 0,]
+        for j in range(k):
+            pred_diff = self.predictor(state, seq_actions[:, :, j], latents)
+            loss_pred += F.mse_loss(pred_diff, seq_states[:, :, j+1,]-seq_states[:, :, j,])
+            state = pred_diff+state
+
+
         # loss_pred_seq = F.mse_loss(predicted_states, next_states-states)
         loss = loss_pred + self.alpha_sim*loss_sim 
         loss.backward()
@@ -184,6 +196,7 @@ def similarity_loss(latents:torch.Tensor):
     B, N, _ = latents.shape
     assert N>1
     device = latents.device
+    latents = F.normalize(latents, dim=-1, p=2)
     masks = torch.eye(N, device = device).unsqueeze(0).repeat(B, 1, 1)
     sum_similarity = latents@latents.permute(0, 2, 1) # B, N, N
     sum_similarity = (1-masks)*sum_similarity

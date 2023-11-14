@@ -77,7 +77,7 @@ class ContextAgentTrainer:
                 with torch.no_grad():
                     offline_act, _ = self.policy.actforward(obs_tensor, True) # offline policy action
                 # first step, no context encoder to be used 
-                if not ep_actions or not res_agent:
+                if len(ep_actions)<2 or not res_agent:
                     action = offline_act.cpu().numpy()
                 else:
                     start_seq = -self.seq_len if len(ep_states)<-self.seq_len else -self.seq_len-1 # same length for state sequence 

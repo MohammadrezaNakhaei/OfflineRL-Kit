@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import MutableMapping, Optional, Tuple
-
+import numpy as np
 
 class ContextEncoder(nn.Module):
     def __init__(
@@ -89,7 +89,7 @@ class ContextEncoder(nn.Module):
         for block in self.blocks:
             out = block(out, padding_mask=padding_mask)
         out = self.out_norm(out)
-        out = self.out_head(out[:, -1]) 
+        out = self.out_head(out[:, -2]) # condition on last state, not last action 
         return out
     
 class ContextPredictor(nn.Module):
@@ -103,7 +103,7 @@ class ContextPredictor(nn.Module):
         layers.pop()
         self.fc = nn.Sequential(*layers)
 
-    def forward(self, states, actions, latents):
+    def forward(self, states:torch.Tensor, actions:torch.Tensor, latents:torch.Tensor):
         total_input = torch.cat([states, actions, latents], dim=-1)
         return self.fc(total_input)
 
@@ -147,20 +147,26 @@ class EncoderModule():
         action = batch['action']
         next_state = batch['next_state']
         latents = self.encode_multiple(seq_states, seq_actions, seq_masks)
-        
-        predicted_state = self.predictor(state, action, latents.mean(1)) # predict according to the mean of latents
+        B, N, T, _ = seq_states.shape
+        # states = seq_states[:, :, 0:-1].reshape(B*N*(T-1),-1)
+        # actions = seq_actions[:, :, 0:-1].reshape(B*N*(T-1),-1)
+        # next_states = seq_states[:, :, 1:].reshape(B*N*(T-1),-1)
+        idx = np.random.randint(N)
+        predicted_state = self.predictor(state, action, latents[:,idx]) # predict according to the mean of latents
+        # predicted_states = self.predictor(states, actions, latents.mean(1).repeat(N*(T-1),1))
+
         self.optimizer.zero_grad()
         # loss = cos(predicted_state, next_state-state).sum()
-        loss_sim = cosine_N(latents, dim=1).mean() # similar to N points
-        loss_dif = -cosine_N(latents, dim=0).mean() # different in batches
+        loss_sim = similarity_loss(latents) # similar to N points
         loss_pred = F.mse_loss(predicted_state, next_state-state)
-        loss = loss_pred + self.alpha_sim*loss_sim + self.beta_dif*loss_dif
+        # loss_pred_seq = F.mse_loss(predicted_states, next_states-states)
+        loss = loss_pred + self.alpha_sim*loss_sim 
         loss.backward()
         self.optimizer.step()
         return {
             'loss/encoder_prediction': loss_pred.item(), 
             'loss/encoder_similarity':loss_sim.item(),
-            'loss/encoder_difference': loss_dif.item(),
+            # 'loss/encoder_prediction_seq': loss_pred_seq.item(),
             }
     
     def train(self, ):
@@ -173,7 +179,13 @@ def cosine(pred, target, reduce=False):
 
     return 2 - 2*(x * y).sum(dim=-1, keepdim=(not reduce))
 
-def cosine_N(tensors, dim=1):
-    x = F.normalize(tensors, dim=-1, p=2) 
-    x = -x.prod(dim)
-    return x.sum(-1)
+def similarity_loss(latents:torch.Tensor):
+    assert latents.ndim == 3
+    B, N, _ = latents.shape
+    assert N>1
+    device = latents.device
+    masks = torch.eye(N, device = device).unsqueeze(0).repeat(B, 1, 1)
+    sum_similarity = latents@latents.permute(0, 2, 1) # B, N, N
+    sum_similarity = (1-masks)*sum_similarity
+    loss = -1/(N-1)*sum_similarity.sum(dim=(1,2)).mean()
+    return loss

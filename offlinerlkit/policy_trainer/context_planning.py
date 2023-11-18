@@ -13,13 +13,13 @@ from dataclasses import dataclass
 @dataclass
 class MPPI:
     horizon:int = 10
-    iteration:int = 10
+    iteration:int = 6
     num_samples:int = 512
     num_elites:int = 64
     temperature:float = 0.5
     min_std:float = 0.05
     max_std:float = 2
-    num_pi_trajs:int = 24
+    num_pi_trajs:int = 48
     discount: float = 0.99
 
 
@@ -94,7 +94,7 @@ class ContextAgentPlanner:
                 with torch.no_grad():
                     offline_act, _ = self.policy.actforward(obs_tensor, True) # offline policy action
                 # first step, no context encoder to be used 
-                if not ep_actions or not res_agent:
+                if len(ep_actions)<self.seq_len or not res_agent:
                     action = offline_act.cpu().numpy()
                 else:
                     start_seq = -self.seq_len if len(ep_states)<-self.seq_len else -self.seq_len-1 # same length for state sequence 
@@ -106,7 +106,7 @@ class ContextAgentPlanner:
                     with torch.no_grad():
                         encoded = self.encoder(context_state, context_actions, time_step).squeeze(0) # context encoder
                         t0 = len(ep_actions)==1
-                        action = self.plan(obs_tensor, encoded, t0)
+                        action = self.plan(obs_tensor, encoded, t0, deterministic)
                 obs, reward, done, info = self.eval_env.step(action)
                 ep_actions.append(action)
                 ep_states.append(obs)
@@ -116,7 +116,6 @@ class ContextAgentPlanner:
         std = self.eval_env.get_normalized_score(np.std(rewards))*100
         return ep_reward, std   
 
-    
     def _prepare_training_samples(self, device:str='cpu'):
         batch = next(self.train_iter)
         seq_states, seq_actions, seq_masks, state, action, reward, next_state, done = [tensor.to(device) for tensor in batch]
@@ -206,7 +205,8 @@ class ContextAgentPlanner:
             ep_states, ep_actions, ep_rewards = [np.array(lst, dtype=np.float32) for lst in (ep_states, ep_actions, ep_rewards)]
             self.buffer.add_traj(dict(
                 states=ep_states, actions=ep_actions, rewards=ep_rewards
-            ))           
+            ))    
+            self.train_iter = iter(self.data_loader)       
             ep_reward = self.env.get_normalized_score(ep_reward)*100
             self.logger.logkv('reward', ep_reward)      
             self.logger.set_timestep(self.total_t) 
@@ -226,7 +226,7 @@ class ContextAgentPlanner:
         return G
 
     @torch.no_grad()
-    def plan(self, state:torch.Tensor, latent:torch.Tensor, t0:bool=False,):
+    def plan(self, state:torch.Tensor, latent:torch.Tensor, t0:bool=False, deterministic:bool=False):
         """Plan a sequence of actions using the learned world model."""		
         obs = state.unsqueeze(0) # add batch dim
         action_dim = self.action_dim #TODO
@@ -277,7 +277,10 @@ class ContextAgentPlanner:
         # Select action
         score = score.squeeze(1).cpu().numpy()
         elite_actions = elite_actions.cpu().numpy()
-        actions = elite_actions[:, np.random.choice(np.arange(score.shape[0]), p=score)]
+        if deterministic:
+            actions = elite_actions[:, 0]
+        else:
+            actions = elite_actions[:, np.random.choice(np.arange(score.shape[0]), p=score)]
         return actions[0].clip(-1, 1)
     
     @torch.no_grad()

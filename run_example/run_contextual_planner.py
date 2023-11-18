@@ -17,7 +17,7 @@ from offlinerlkit.buffer import NSequenceBuffer, ReplayBuffer
 from offlinerlkit.utils.logger import Logger
 from offlinerlkit.utils.modify_env import ModifiedENV, SemiSimpleModifiedENV, SimpleModifiedENV, MassDampingENV
 from offlinerlkit.policy_trainer import ContextAgentPlanner
-from offlinerlkit.nets import ContextEncoder, ContextPredictor, EncoderModule
+from offlinerlkit.nets import ContextEncoder, ContextPredictor, EncoderModule, EncoderConv
 from offlinerlkit.utils.load_dataset import qlearning_dataset
 
 def get_args():
@@ -44,6 +44,7 @@ def get_args():
     parser.add_argument("--latent-dim", type=int, default=8, help='encoder output dim')
     parser.add_argument("--seq-len", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument('--encoder-type', type=str, default='cnn') # or transformer
     parser.add_argument('--num-workers', type=int, default=4, help='number of cpu cores used to prepare data')
     parser.add_argument("--encoder-layers", type=int, default=1, help='number of layers in encoder (transformer)')
     parser.add_argument("--encoder-heads", type=int, default=4, help='number of heads in multi-head attention')
@@ -53,7 +54,6 @@ def get_args():
     parser.add_argument("--coeff", type=float, default=0.9, help='coefficient for context/offline actions')
     parser.add_argument("--hidden-dims-predictor", type=int, nargs='*', default=[256, 256])
     parser.add_argument("--loss-sim", type=float, default=0.0, help='Coefficient for similarity loss in N points from one trajectory')
-    parser.add_argument("--loss-diff", type=float, default=0.0, help='Coefficient for non-similarity for different batches')
     parser.add_argument("--tag", type=str, default='', help='used for logging')
     
     return parser.parse_args()
@@ -150,14 +150,23 @@ def train(mainargs=get_args()):
     
     policy.load_state_dict(torch.load(f'{load_path}/checkpoint/policy.pth'))
 
-    encoder = ContextEncoder(
-        state_dim = np.prod(args.obs_shape), 
-        action_dim = args.action_dim, 
-        seq_len = mainargs.seq_len, 
-        output_dim = mainargs.latent_dim, 
-        num_layers=mainargs.encoder_layers,
-        num_heads=mainargs.encoder_heads,
+    if mainargs.encoder_type == 'transformer':
+        encoder = ContextEncoder(
+            state_dim = np.prod(args.obs_shape), 
+            action_dim = args.action_dim, 
+            seq_len = mainargs.seq_len, 
+            output_dim = mainargs.latent_dim, 
+            num_layers=mainargs.encoder_layers,
+            num_heads=mainargs.encoder_heads,
+            )
+    else:
+        encoder = EncoderConv(
+            state_dim = np.prod(args.obs_shape),
+            action_dim = args.action_dim,
+            seq_len = mainargs.seq_len, 
+            output_dim = mainargs.latent_dim,
         )
+
     predictor = ContextPredictor(
         state_dim = np.prod(args.obs_shape), 
         action_dim = args.action_dim, 
@@ -169,7 +178,6 @@ def train(mainargs=get_args()):
     encoder_module = EncoderModule(
         encoder, predictor, lr=mainargs.encoder_lr, 
         alpha_sim=mainargs.loss_sim, 
-        beta_dif=mainargs.loss_diff
         )
     buffer = NSequenceBuffer(mainargs.buffer_size, mainargs.seq_len, mainargs.encoder_points)
     # create buffer

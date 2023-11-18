@@ -5,6 +5,7 @@ import gym
 import numpy as np
 import torch
 import d4rl 
+from torch.utils.data import DataLoader
 
 from offlinerlkit.nets import MLP
 from offlinerlkit.modules import Actor, Critic, EnsembleDynamicsModel, ActorProb, TanhDiagGaussian
@@ -15,18 +16,18 @@ from offlinerlkit.utils.logger import make_log_dirs, load_args
 from offlinerlkit.policy import COMBOPolicy, SACPolicy, TD3Policy
 from offlinerlkit.buffer import NSequenceBuffer
 from offlinerlkit.utils.logger import Logger
-from offlinerlkit.utils.modify_env import ModifiedENV, SemiSimpleModifiedENV, SimpleModifiedENV
+from offlinerlkit.utils.modify_env import ModifiedENV, SemiSimpleModifiedENV, SimpleModifiedENV, MassDampingENV
 from offlinerlkit.policy_trainer import ContextAgentTrainer
-from offlinerlkit.nets import ContextEncoder, ContextPredictor, EncoderModule
+from offlinerlkit.nets import ContextEncoder, ContextPredictor, EncoderModule, EncoderConv
 from offlinerlkit.utils.noise import GaussianNoise
-
+from offlinerlkit.utils.load_dataset import qlearning_dataset, transform_to_episodic
 
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--algo-name", type=str, default="combo")
     parser.add_argument("--task", type=str, default="hopper-medium-v2")
     parser.add_argument("--max-delta", type=float, default=0.2, help='maximum perturbation in mass')
-    parser.add_argument("--env-mode", type=str, default="complex", 
+    parser.add_argument("--env-mode", type=str, default="def", 
                         help='simple, semi-simple or complex environment, different types of perturbation')
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--offline-seed", type=int, default=40, help='seed of loaded offline agent')
@@ -41,19 +42,22 @@ def get_args():
     parser.add_argument("--auto-alpha", default=True)
     parser.add_argument("--target-entropy", type=int, default=None)
     parser.add_argument("--alpha-lr", type=float, default=1e-4)    
-    parser.add_argument("--buffer-size", type=int, default=100, help='number of trajectories in the buffer') 
+    parser.add_argument("--buffer-size", type=int, default=1000, help='number of trajectories in the buffer') 
     parser.add_argument("--latent-dim", type=int, default=8, help='encoder output dim')
     parser.add_argument("--seq-len", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument('--num-workers', type=int, default=4, help='number of cpu cores used to prepare data')
+    parser.add_argument('--encoder-type', type=str, default='cnn') # or transformer
     parser.add_argument("--encoder-layers", type=int, default=1, help='number of layers in encoder (transformer)')
     parser.add_argument("--encoder-heads", type=int, default=4, help='number of heads in multi-head attention')
     parser.add_argument("--encoder-lr", type=float, default=1e-4, help='learning rate for encoder')
+    parser.add_argument("--pre-train-steps", type=int, default=20000, help='number of gradient steps to pretrain encoder from offline data')
     parser.add_argument("--encoder-points", type=int, default=4, 
                         help='number of subtrajectories used to train the encoder, mean value is used for training')
+    parser.add_argument("--coeff", type=float, default=0.6, help='coefficient for context/offline actions')
     parser.add_argument("--hidden-dims-predictor", type=int, nargs='*', default=[256, 256])
+    parser.add_argument("--loss-sim", type=float, default=0.2, help='Coefficient for similarity loss in N points from one trajectory')
     parser.add_argument("--tag", type=str, default='', help='used for logging')
-    
     return parser.parse_args()
 
 
@@ -62,12 +66,15 @@ def train(mainargs=get_args()):
     args = load_args(os.path.join(load_path, 'record/hyper_param.json'))
     args.action_dim = int(args.action_dim) # when loaded from json file, default is float
     # create env and dataset
+    mainargs.device = args.device
     env = gym.make(args.task)
+    dataset = qlearning_dataset(env)
     eval_env = gym.make(args.task)
     EnvMode = {
         'simple': SimpleModifiedENV,
         'semi-simple': SemiSimpleModifiedENV,
         'complex': ModifiedENV,
+        'def': MassDampingENV,
     }
     env = EnvMode[mainargs.env_mode](env, mainargs.max_delta)
     eval_env = EnvMode[mainargs.env_mode](eval_env, mainargs.max_delta)
@@ -146,13 +153,21 @@ def train(mainargs=get_args()):
     
     policy.load_state_dict(torch.load(f'{load_path}/checkpoint/policy.pth'))
 
-    encoder = ContextEncoder(
-        state_dim = np.prod(args.obs_shape), 
-        action_dim = args.action_dim, 
-        seq_len = mainargs.seq_len, 
-        output_dim = mainargs.latent_dim, 
-        num_layers=mainargs.encoder_layers,
-        num_heads=mainargs.encoder_heads,
+    if mainargs.encoder_type == 'transformer':
+        encoder = ContextEncoder(
+            state_dim = np.prod(args.obs_shape), 
+            action_dim = args.action_dim, 
+            seq_len = mainargs.seq_len, 
+            output_dim = mainargs.latent_dim, 
+            num_layers=mainargs.encoder_layers,
+            num_heads=mainargs.encoder_heads,
+            )
+    else:
+        encoder = EncoderConv(
+            state_dim = np.prod(args.obs_shape),
+            action_dim = args.action_dim,
+            seq_len = mainargs.seq_len, 
+            output_dim = mainargs.latent_dim,
         )
     predictor = ContextPredictor(
         state_dim = np.prod(args.obs_shape), 
@@ -162,7 +177,13 @@ def train(mainargs=get_args()):
     )
     encoder.to(args.device)
     predictor.to(args.device)
-    encoder_module = EncoderModule(encoder, predictor, lr=mainargs.encoder_lr)
+    encoder_module = EncoderModule(
+        encoder, predictor, lr=mainargs.encoder_lr, 
+        alpha_sim=mainargs.loss_sim, 
+        )
+    
+    pre_train_encoder(encoder_module, dataset, mainargs)
+
     buffer = NSequenceBuffer(mainargs.buffer_size, mainargs.seq_len, mainargs.encoder_points)
     obs_shape_res = np.prod(args.obs_shape) + args.action_dim + mainargs.latent_dim
 
@@ -217,7 +238,33 @@ def train(mainargs=get_args()):
     # res_agent.pre_train(10, 100)
     res_agent.run(max_step=mainargs.max_steps)
 
-
+def pre_train_encoder( encoder:EncoderModule, data, args):
+    episodes = transform_to_episodic(data)
+    n_episodes = len(episodes)
+    buffer = NSequenceBuffer(n_episodes, args.seq_len, args.encoder_points)
+    for episode in episodes:
+        buffer.add_traj({
+            'states': episode['observations'],
+            'actions': episode['actions'],
+            'rewards': episode['rewards'],
+        })
+    data_loader = DataLoader(buffer, batch_size=args.batch_size, num_workers=args.num_workers)
+    itr = iter(data_loader)
+    for i in range(args.pre_train_steps):
+        batch = next(itr)
+        seq_states, seq_actions, seq_masks, state, action, reward, next_state, done = [tensor.to(args.device) for tensor in batch]
+        batch_encoder = dict(
+            seq_states = seq_states, 
+            seq_actions = seq_actions, 
+            seq_masks = seq_masks, 
+            state = state, 
+            action = action, 
+            next_state = next_state
+            )
+        losses = encoder.learn_batch(batch_encoder)
+        if (i+1)%1000 ==0:
+            print(f'Pre training step {i+1}')
+            print('    '.join(f'{k}: {v:.5f}' for k,v in losses.items()))
 
 if __name__ == '__main__':
     mainargs=get_args()

@@ -77,7 +77,7 @@ class ContextAgentTrainer:
                 with torch.no_grad():
                     offline_act, _ = self.policy.actforward(obs_tensor, True) # offline policy action
                 # first step, no context encoder to be used 
-                if len(ep_actions)<2 or not res_agent:
+                if len(ep_actions)<self.seq_len or not res_agent:
                     action = offline_act.cpu().numpy()
                 else:
                     start_seq = -self.seq_len if len(ep_states)<-self.seq_len else -self.seq_len-1 # same length for state sequence 
@@ -90,7 +90,7 @@ class ContextAgentTrainer:
                         encoded = self.encoder(context_state, context_actions, time_step).squeeze(0) # context encoder
                         res_state = self._res_state(obs_tensor, offline_act, encoded) # augmented state
                         res_action = self.agent.select_action(res_state, deterministic=deterministic) 
-                        action = self._total_action(offline_act.cpu().numpy(), res_action)
+                        action = self._total_action(offline_act.cpu().numpy(), res_action)                        
                 obs, reward, done, info = self.eval_env.step(action)
                 ep_actions.append(action)
                 ep_states.append(obs)
@@ -178,7 +178,7 @@ class ContextAgentTrainer:
                 with torch.no_grad():
                     offline_act, _ = self.policy.actforward(obs_tensor, True) # offline policy action
                 # first step, no context encoder to be used 
-                if not ep_actions:
+                if len(ep_actions)<self.seq_len:
                     action = offline_act.cpu().numpy()
                 else:
                     start_seq = -self.seq_len if len(ep_states)<-self.seq_len else -self.seq_len-1 # same length for state sequence 
@@ -218,7 +218,8 @@ class ContextAgentTrainer:
             ep_states, ep_actions, ep_rewards = [np.array(lst, dtype=np.float32) for lst in (ep_states, ep_actions, ep_rewards)]
             self.buffer.add_traj(dict(
                 states=ep_states, actions=ep_actions, rewards=ep_rewards
-            ))           
+            ))        
+            self.train_iter = iter(self.data_loader)   
             ep_reward = self.env.get_normalized_score(ep_reward)*100
             self.logger.logkv('reward', ep_reward)      
             self.logger.set_timestep(self.total_t) 

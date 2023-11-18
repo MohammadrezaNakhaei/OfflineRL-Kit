@@ -172,6 +172,7 @@ def transform_to_episodic(dataset):
         for k in ['observations', 'next_observations', 'actions', 'rewards', 'terminals']:
             data_[k].append(dataset[k][i])
         if done_bool or final_timestep:
+            data_['observations'].append(dataset['next_observations'][i])
             episode_data = {}
             for k in data_:
                 episode_data[k] = np.array(data_[k])

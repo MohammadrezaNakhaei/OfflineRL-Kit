@@ -5,6 +5,53 @@ import torch.nn.functional as F
 from typing import MutableMapping, Optional, Tuple
 import numpy as np
 
+
+class EncoderConv(nn.Module):
+    def __init__(
+        self, 
+        state_dim, 
+        action_dim, 
+        seq_len, 
+        hidden_dim=16,
+        output_dim=16,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.seq_len = seq_len
+        self.state_emb = nn.Linear(state_dim, hidden_dim, bias=False)
+        self.action_emb = nn.Linear(action_dim, hidden_dim, bias=False)
+        self.conv = nn.Sequential(
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=4, bias=False),
+            nn.ReLU(),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=2, bias=False),
+            nn.ReLU(), 
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
+            nn.ReLU(), 
+            nn.Flatten(),
+        ) 
+        tst_sample = torch.ones((1, hidden_dim, 2*seq_len)) 
+        out_conv = self._get_shape(tst_sample)
+        self.output = nn.Linear(out_conv, output_dim, bias=False)
+
+    def _get_shape(self, sample):
+        return np.prod(self.conv(sample).shape)
+
+    def forward(self, states, actions, *kargs, **kwargs):
+        assert states.ndim == 3
+        assert actions.ndim == 3
+        # B, T, dim
+        batch_size, seq_len, _ = states.shape
+        assert seq_len == self.seq_len
+        state_emb = self.state_emb(states)
+        action_emb = self.action_emb(actions)
+
+        # [batch_size, seq_len * 2, emb_dim], ( s_0, a_0, s_1, a_1, ...) batch_size, seq_len, emb_dim
+        sequence = torch.stack([state_emb, action_emb], dim=1).permute(0, 2, 1, 3).reshape(batch_size, 2 * seq_len, self.hidden_dim)
+        sequence = sequence.permute(0, 2, 1) # batch_size, emb_dim, seq_len
+        out_conv = self.conv(sequence)
+        return self.output(out_conv)
+
+
 class ContextEncoder(nn.Module):
     def __init__(
         self,
@@ -109,12 +156,11 @@ class ContextPredictor(nn.Module):
 
 
 class EncoderModule():
-    def __init__(self, encoder: ContextEncoder, predictor: ContextPredictor, lr:float=1e-4, alpha_sim:float=0.2, beta_dif:float=0.1):
+    def __init__(self, encoder: ContextEncoder, predictor: ContextPredictor, lr:float=1e-4, alpha_sim:float=0.25,):
         self.encoder = encoder
         self.predictor = predictor
         self.optimizer = torch.optim.Adam(list(encoder.parameters())+list(predictor.parameters()), lr)
         self.alpha_sim = alpha_sim
-        self.beta_dif = beta_dif
     
     def __call__(self, seq_state:torch.Tensor, seq_action:torch.Tensor, time_step:torch.Tensor):
         return self.encode(seq_state, seq_action, time_step)
@@ -151,34 +197,26 @@ class EncoderModule():
         if k is None:
             k = T//2
         assert k<T
-        # states = seq_states[:, :, 0:-1].reshape(B*N*(T-1),-1)
-        # actions = seq_actions[:, :, 0:-1].reshape(B*N*(T-1),-1)
-        # next_states = seq_states[:, :, 1:].reshape(B*N*(T-1),-1)
         idx = np.random.randint(N)
         predicted_state = self.predictor(state, action, latents[:,idx])
-        # predicted_states = self.predictor(states, actions, latents.mean(1).repeat(N*(T-1),1))
 
         self.optimizer.zero_grad()
-        # loss = cos(predicted_state, next_state-state).sum()
         loss_sim = similarity_loss(latents) # similar to N points
         loss_pred = F.mse_loss(predicted_state, next_state-state)
         
-        # kstep prediction loss
+        # k-step prediction loss
         state = seq_states[:, :, 0,]
         for j in range(k):
             pred_diff = self.predictor(state, seq_actions[:, :, j], latents)
             loss_pred += F.mse_loss(pred_diff, seq_states[:, :, j+1,]-seq_states[:, :, j,])
             state = pred_diff+state
 
-
-        # loss_pred_seq = F.mse_loss(predicted_states, next_states-states)
         loss = loss_pred + self.alpha_sim*loss_sim 
         loss.backward()
         self.optimizer.step()
         return {
             'loss/encoder_prediction': loss_pred.item(), 
             'loss/encoder_similarity':loss_sim.item(),
-            # 'loss/encoder_prediction_seq': loss_pred_seq.item(),
             }
     
     def train(self, ):

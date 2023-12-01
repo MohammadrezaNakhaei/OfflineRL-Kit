@@ -124,6 +124,7 @@ class ContextAgentTrainer:
             offline_act, _ = self.policy.actforward(state, True) # offline policy action
             next_offline_act, _ = self.policy.actforward(next_state, True)
             latents = self.encoder.encode_multiple(seq_states, seq_actions, seq_masks)
+            idx = np.random.randint(latents.shape[1])
             latents = latents.mean(1) # batch dim, N, latent dim
         observations = self._res_state(state, offline_act, latents)
         next_observations = self._res_state(next_state, next_offline_act, latents)

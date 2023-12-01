@@ -3,7 +3,7 @@ from offlinerlkit.nets.vae import VAE
 from offlinerlkit.nets.ensemble_linear import EnsembleLinear
 from offlinerlkit.nets.rnn import RNNModel
 from offlinerlkit.nets.decoder import DecoderBlock
-from offlinerlkit.nets.context_encoder_decoder import ContextEncoder, ContextPredictor, EncoderModule, EncoderConv
+from offlinerlkit.nets.context_encoder_decoder import ContextEncoder, ContextPredictor, EncoderModule, EncoderConv, EncoderModule2
 
 __all__ = [
     "MLP",
@@ -15,4 +15,5 @@ __all__ = [
     "ContextPredictor",
     "EncoderModule",
     "EncoderConv",
+    "EncoderModule2",
 ]

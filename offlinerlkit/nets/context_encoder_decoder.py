@@ -139,6 +139,7 @@ class ContextEncoder(nn.Module):
         out = self.out_head(out[:, -2]) # condition on last state, not last action 
         return out
     
+
 class ContextPredictor(nn.Module):
     def __init__(self, state_dim:int, action_dim:int, latent_dim:int, hidden_dim:Tuple[int]=(256, 256)):
         super().__init__()
@@ -223,11 +224,93 @@ class EncoderModule():
         self.encoder.train()
         self.predictor.train()
 
+
+class EncoderModule2(EncoderModule):
+    """
+    Compared to previous version:
+    1: normalized target
+    2: look ahead context training: latents from prior transition used for training
+    """
+    def __init__(self, 
+                 encoder: ContextEncoder, 
+                 predictor: ContextPredictor,
+                 k_steps:int = 5,
+                 lr: float = 0.0001, 
+                 alpha_sim: float = 0.25,
+                 mu: torch.Tensor=0,
+                 std: torch.Tensor = 1
+                 ):
+        super().__init__(encoder, predictor, lr, alpha_sim)
+        self.k = k_steps
+        self.seq_len = self.encoder.seq_len
+        self.mu = mu
+        self.std = std
+    
+    def _normalize(self, tensor):
+        return (tensor-self.mu)/self.std
+    
+    def _unnormalize(self, tensor):
+        return self.std*tensor+self.mu
+
+    def learn_batch(self, batch:MutableMapping[str, torch.Tensor], ):
+        # currently no contrastive loss, only consider the mean of latent space
+        seq_states = batch['seq_states']
+        seq_actions = batch['seq_actions']
+        seq_masks = batch['seq_masks']
+        state = batch['state']
+        action = batch['action']
+        next_state = batch['next_state']
+        B, N, T, _ = seq_states.shape
+
+        # assert self.k + self.seq_len == T
+        idx = np.random.randint(N)
+        latents = self.encode_multiple(seq_states[:, :, :self.seq_len, :], seq_actions[:, :, :self.seq_len, :], seq_masks[:, :, :self.seq_len])
+
+        predicted_state = self.predictor(state, action, latents[:,idx])
+        target = self._normalize(next_state-state)
+
+        self.optimizer.zero_grad()
+        loss_sim = similarity_loss(latents) # similar to N points
+        loss_pred = F.mse_loss(predicted_state, target)
+        
+        # k-step prediction loss
+        start_ind = self.seq_len-1
+        state = seq_states[:, :, start_ind,]
+        for j in range(self.k):
+            pred_diff = self.predictor(state, seq_actions[:, :, start_ind+j], latents)
+            target = self._normalize(seq_states[:,:,start_ind+j+1]- seq_states[:,:,start_ind+j])
+            loss_pred += F.mse_loss(pred_diff, target)
+            state = self._unnormalize(pred_diff)+state
+        loss = loss_pred + self.alpha_sim*loss_sim 
+        loss.backward()
+        self.optimizer.step()
+        return {
+            'loss/encoder_prediction': loss_pred.item(), 
+            'loss/encoder_similarity':loss_sim.item(),
+            }
+    
+    def encode_multiple(self, seq_states:torch.Tensor, seq_actions:torch.Tensor, seq_masks:torch.Tensor):
+        assert seq_states.ndim==4
+        seq_states = seq_states[:,:,:self.seq_len]
+        seq_actions = seq_actions[:,:,:self.seq_len]
+        seq_masks = seq_masks[:,:,:self.seq_len]
+        B, N, T, _ = seq_states.shape
+        device = seq_states.device
+        timesteps = torch.arange(0, T, device=device).repeat(N*B, 1)
+        latents = self.encoder(
+            seq_states.view(B*N, T, -1), 
+            seq_actions.view(B*N, T, -1),
+            timesteps,
+            seq_masks.view(B*N, T).bool(),
+            )
+        latents = latents.view(B, N, -1)
+        return latents  
+
 def cosine(pred, target, reduce=False):
     x = F.normalize(pred, dim=-1, p=2)
     y = F.normalize(target, dim=-1, p=2)
-
     return 2 - 2*(x * y).sum(dim=-1, keepdim=(not reduce))
+
 
 def similarity_loss(latents:torch.Tensor):
     assert latents.ndim == 3
@@ -240,3 +323,5 @@ def similarity_loss(latents:torch.Tensor):
     sum_similarity = (1-masks)*sum_similarity
     loss = -1/(N-1)*sum_similarity.sum(dim=(1,2)).mean()
     return loss
+
+

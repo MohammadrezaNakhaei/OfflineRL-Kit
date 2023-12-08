@@ -77,8 +77,9 @@ class MassDampingENV(gym.Env):
         self._max_delta = max_delta
         self.mass_ratios = (0.75, 0.85, 1, 1.15, 1.25)
         self.damping_ratios = (0.75, 0.85, 1, 1.15, 1.25)
-        self.original_body_mass = env.env.wrapped_env.model.body_mass.copy()
-        self.original_damping = env.env.wrapped_env.model.dof_damping.copy()
+        model = env.env.wrapped_env.model
+        self.original_body_mass = model.body_mass.copy()
+        self.original_damping = model.dof_damping.copy()
     
     def reset(self,):
         model = self._env.env.wrapped_env.model
@@ -87,6 +88,7 @@ class MassDampingENV(gym.Env):
         ind_damp = np.random.randint(len(self.damping_ratios))
         for i in range(n_link):
             model.body_mass[i] = self.original_body_mass[i]*self.mass_ratios[ind_mass]
+        for i in range(model.dof_damping.shape[0]):
             model.dof_damping[i] = self.original_damping[i]*self.damping_ratios[ind_damp]
         return self._env.reset()
     

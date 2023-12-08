@@ -13,24 +13,25 @@ from offlinerlkit.dynamics import EnsembleDynamics
 from offlinerlkit.utils.scaler import StandardScaler
 from offlinerlkit.utils.termination_fns import get_termination_fn
 from offlinerlkit.utils.logger import make_log_dirs, load_args
-from offlinerlkit.policy import COMBOPolicy, SACPolicy
+from offlinerlkit.policy import COMBOPolicy, SACPolicy, CQLPolicy
 from offlinerlkit.buffer import NSequenceBuffer
 from offlinerlkit.utils.logger import Logger
-from offlinerlkit.utils.modify_env import ModifiedENV, SemiSimpleModifiedENV, SimpleModifiedENV, MassDampingENV
+from offlinerlkit.utils.modify_env import ModifiedENV, SemiSimpleModifiedENV, SimpleModifiedENV
 from offlinerlkit.policy_trainer import ContextAgentTrainer
-from offlinerlkit.nets import ContextEncoder, ContextPredictor, EncoderModule, EncoderConv
+from offlinerlkit.nets import ContextEncoder, ContextPredictor, EncoderModule2, EncoderConv, EncoderModule
 from offlinerlkit.utils.load_dataset import qlearning_dataset, transform_to_episodic
+import d4rl_extra
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--algo-name", type=str, default="combo")
-    parser.add_argument("--task", type=str, default="hopper-medium-v2")
+    parser.add_argument("--algo-name", type=str, default="cql")
+    parser.add_argument("--task", type=str, default="pendulum-replay-v2")
     parser.add_argument("--max-delta", type=float, default=0.2, help='maximum perturbation in mass')
     parser.add_argument("--env-mode", type=str, default="def", 
                         help='def, simple, semi-simple or complex environment, different types of perturbation')
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--offline-seed", type=int, default=40, help='seed of loaded offline agent')
-    parser.add_argument("--max-steps", type=int, default=int(1e6))
+    parser.add_argument("--offline-seed", type=int, default=10, help='seed of loaded offline agent')
+    parser.add_argument("--max-steps", type=int, default=int(250_000))
     parser.add_argument('--n-update', type=int, default=1, help='number of updates in each samples')
     parser.add_argument("--actor-lr", type=float, default=1e-4)
     parser.add_argument("--critic-lr", type=float, default=3e-4)
@@ -42,7 +43,7 @@ def get_args():
     parser.add_argument("--target-entropy", type=int, default=None)
     parser.add_argument("--alpha-lr", type=float, default=1e-4)    
     parser.add_argument("--buffer-size", type=int, default=1000, help='number of trajectories in the buffer') 
-    parser.add_argument("--latent-dim", type=int, default=8, help='encoder output dim')
+    parser.add_argument("--latent-dim", type=int, default=2, help='encoder output dim')
     parser.add_argument("--seq-len", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument('--num-workers', type=int, default=4, help='number of cpu cores used to prepare data')
@@ -56,10 +57,34 @@ def get_args():
     parser.add_argument("--coeff", type=float, default=0.6, help='coefficient for context/offline actions')
     parser.add_argument("--hidden-dims-predictor", type=int, nargs='*', default=[256, 256])
     parser.add_argument("--loss-sim", type=float, default=0.2, help='Coefficient for similarity loss in N points from one trajectory')
+    parser.add_argument("--k-step", type=int, default=5, help='Number of future steps for prediction loss in training the encoder')
     parser.add_argument("--tag", type=str, default='', help='used for logging')
     return parser.parse_args()
 
-
+class MassDampingENV(gym.Env):
+    def __init__(self, env, max_delta=0.2):
+        self._env = env
+        self.action_space = env.action_space
+        self.observation_space = env.observation_space
+        self._max_delta = max_delta
+        self.mass_ratios = (0.25, 0.5, 0.75, 1, 1.5, 2, 3, 5)
+        self.original_body_mass = env.env.wrapped_env.model.body_mass.copy()
+        self._max_episode_steps = 1000
+    
+    def reset(self,):
+        model = self._env.env.wrapped_env.model
+        n_link = model.body_mass.shape[0]
+        ind_mass = np.random.randint(len(self.mass_ratios))
+        for i in range(n_link):
+            model.body_mass[i] = self.original_body_mass[i]*self.mass_ratios[ind_mass]
+        return self._env.reset()
+    
+    def step(self, action):
+        return self._env.step(action)
+    
+    def get_normalized_score(self, score):
+        return self._env.get_normalized_score(score)
+    
 def train(mainargs=get_args()):
     load_path = f'log/{mainargs.task}/{mainargs.algo_name}/seed_{mainargs.offline_seed}'
     args = load_args(os.path.join(load_path, 'record/hyper_param.json'))
@@ -104,30 +129,30 @@ def train(mainargs=get_args()):
     alpha = None
 
     # create dynamics
-    dynamics_model = EnsembleDynamicsModel(
-        obs_dim=np.prod(args.obs_shape),
-        action_dim=args.action_dim,
-        hidden_dims=args.dynamics_hidden_dims,
-        num_ensemble=args.n_ensemble,
-        num_elites=args.n_elites,
-        weight_decays=args.dynamics_weight_decay,
-        device=args.device
-    )
-    dynamics_optim = None
-    scaler = StandardScaler()
-    scaler.load_scaler(f'{load_path}/model')
-    termination_fn = get_termination_fn(task=args.task)
-    dynamics = EnsembleDynamics(
-        dynamics_model,
-        dynamics_optim,
-        scaler,
-        termination_fn
-    )
-    dynamics.load(f'{load_path}/model')
+    # dynamics_model = EnsembleDynamicsModel(
+    #     obs_dim=np.prod(args.obs_shape),
+    #     action_dim=args.action_dim,
+    #     hidden_dims=args.dynamics_hidden_dims,
+    #     num_ensemble=args.n_ensemble,
+    #     num_elites=args.n_elites,
+    #     weight_decays=args.dynamics_weight_decay,
+    #     device=args.device
+    # )
+    # dynamics_optim = None
+    # scaler = StandardScaler()
+    # scaler.load_scaler(f'{load_path}/model')
+    # termination_fn = get_termination_fn(task=args.task)
+    # dynamics = EnsembleDynamics(
+    #     dynamics_model,
+    #     dynamics_optim,
+    #     scaler,
+    #     termination_fn
+    # )
+    # dynamics.load(f'{load_path}/model')
 
     # create policy
-    policy = COMBOPolicy(
-        dynamics,
+    policy = CQLPolicy(
+        # dynamics,
         actor,
         critic1,
         critic2,
@@ -146,8 +171,8 @@ def train(mainargs=get_args()):
         lagrange_threshold=args.lagrange_threshold,
         cql_alpha_lr=args.cql_alpha_lr,
         num_repeart_actions=args.num_repeat_actions,
-        uniform_rollout=args.uniform_rollout,
-        rho_s=args.rho_s
+        # uniform_rollout=args.uniform_rollout,
+        # rho_s=args.rho_s
     )
     
     policy.load_state_dict(torch.load(f'{load_path}/checkpoint/policy.pth'))
@@ -176,14 +201,20 @@ def train(mainargs=get_args()):
     )
     encoder.to(args.device)
     predictor.to(args.device)
-    encoder_module = EncoderModule(
+    mu_state = torch.tensor(dataset['observations'].mean(0), device=args.device, dtype=torch.float32)
+    std_state = torch.tensor(dataset['observations'].std(0), device=args.device, dtype=torch.float32)
+    print(mu_state)
+    print(std_state)
+    # print(mu_state.shape, std_state.shape)
+    encoder_module = EncoderModule2(
         encoder, predictor, lr=mainargs.encoder_lr, 
-        alpha_sim=mainargs.loss_sim, 
+        alpha_sim=mainargs.loss_sim, k_steps=mainargs.k_step, 
+        mu=mu_state, std=std_state, 
         )
     
-    pre_train_encoder(encoder_module, dataset, mainargs)
+    # pre_train_encoder(encoder_module, dataset, mainargs)
 
-    buffer = NSequenceBuffer(mainargs.buffer_size, mainargs.seq_len, mainargs.encoder_points)
+    buffer = NSequenceBuffer(mainargs.buffer_size, mainargs.seq_len+mainargs.k_step, mainargs.encoder_points)
     obs_shape_res = np.prod(args.obs_shape) + args.action_dim + mainargs.latent_dim
 
     res_actor_backbone = MLP(input_dim=obs_shape_res, hidden_dims=mainargs.hidden_dims)
@@ -227,7 +258,7 @@ def train(mainargs=get_args()):
     
 
     # log
-    log_dirs = make_log_dirs(f'{args.task}-context', f'{args.algo_name}_sac', mainargs.seed, vars(mainargs), record_params=['tag'])
+    log_dirs = make_log_dirs(f'{args.task}-context', f'normalized_encoder', mainargs.seed, vars(mainargs), record_params=['tag'])
     # key: output file name, value: output handler type
     output_config = {
         "consoleout_backup": "stdout",
@@ -235,7 +266,7 @@ def train(mainargs=get_args()):
         "tb": "tensorboard"
     }
     logger = Logger(log_dirs, output_config)
-    logger.log_hyperparameters(vars(args))
+    logger.log_hyperparameters(vars(mainargs))
 
     res_agent = ContextAgentTrainer(
         env = env, eval_env = eval_env, policy = policy,
@@ -252,10 +283,10 @@ def train(mainargs=get_args()):
 
 
 
-def pre_train_encoder( encoder:EncoderModule, data, args):
+def pre_train_encoder( encoder:EncoderModule2, data, args):
     episodes = transform_to_episodic(data)
     n_episodes = len(episodes)
-    buffer = NSequenceBuffer(n_episodes, args.seq_len, args.encoder_points)
+    buffer = NSequenceBuffer(n_episodes, args.seq_len+args.k_step, args.encoder_points)
     for episode in episodes:
         buffer.add_traj({
             'states': episode['observations'],
